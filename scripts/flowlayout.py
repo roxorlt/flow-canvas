@@ -1,0 +1,682 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""flow-canvas 正交流程图布局器（零依赖，Python 标准库）。
+
+输入 mermaid flowchart 子集（.mmd）或 flowspec JSON（.json），
+输出横平竖直的正交流程图 SVG，或带缩放/拖拽画布的单文件 HTML。
+
+布局规则（正交规范）：
+  - 主干节点排纵向主列，分支节点排右列并与判断节点垂直居中对齐；
+  - 判断菱形为扁菱形；"否"类分支从右侧水平顶点出线，主干从底部顶点出线；
+  - 回边走最右侧通道，90 度折线，进入目标右侧端口（多入口自动错位）；
+  - 分支链汇回主干：目标为判断节点时 T 形汇入主干线，目标为普通节点时进右端口；
+  - 无入边的旁路源节点排左列，与目标水平对齐；
+  - 输出前自动做线段交叉检测，交叉数超过阈值时建议降级为 mermaid 原生渲染。
+
+用法：
+  python3 flowlayout.py input.mmd  -o out.svg
+  python3 flowlayout.py input.mmd  -o out.html --html [--title "标题"]
+  python3 flowlayout.py input.json -o out.svg
+  python3 flowlayout.py input.mmd  --check          # 仅输出布局检查报告 JSON
+  python3 flowlayout.py input.mmd  -o out.svg --style style.json   # 覆盖样式变量
+"""
+import json
+import re
+import sys
+import argparse
+import unicodedata
+
+SPEC_VERSION = "flowspec/1"
+
+# ── 默认样式（灰度线框；调用方可用 --style 覆盖任意键） ──────────────
+DEFAULT_STYLE = {
+    "font_family": "-apple-system, PingFang SC, Segoe UI, Microsoft YaHei, sans-serif",
+    "fs_node": 13,
+    "fs_sub": 11,
+    "fs_label": 11,
+    "stroke_process": "#333333",
+    "stroke_external": "#888888",
+    "stroke_backend": "#999999",
+    "stroke_decision": "#aaaaaa",
+    "fill_process": "#ffffff",
+    "fill_external": "#ffffff",
+    "fill_backend": "#d9d9d9",
+    "fill_decision": "#ededed",
+    "text_process": "#333333",
+    "text_external": "#666666",
+    "text_backend": "#333333",
+    "text_decision": "#333333",
+    "edge_color": "#555555",
+    "label_color": "#888888",
+    "sel_ring_stroke": "#4a90d9",
+    "sel_ring_fill": "rgba(74,144,217,0.08)",
+}
+
+EMOJI_RANGES = [
+    (0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2B00, 0x2BFF),
+    (0xFE0F, 0xFE0F), (0x2705, 0x2705), (0x274C, 0x274C),
+    (0x2714, 0x2714), (0x2716, 0x2716),
+]
+
+
+def find_emoji(text):
+    return [ch for ch in text if any(a <= ord(ch) <= b for a, b in EMOJI_RANGES)]
+
+
+def text_width(s, fs):
+    """按字符宽度估算文本像素宽（全角 1.0、半角 0.55），留 8% buffer 兜字体差异。"""
+    w = 0.0
+    for ch in s:
+        w += fs * (1.0 if unicodedata.east_asian_width(ch) in ("F", "W") else 0.55)
+    return w * 1.08
+
+
+# ── 解析层 ──────────────────────────────────────────────────────────
+NODE_SHAPES = [
+    (re.compile(r'^\[\["?(.*?)"?\]\]'), "backend"),
+    (re.compile(r'^\{"?(.*?)"?\}'), "decision"),
+    (re.compile(r'^\["?(.*?)"?\]'), "process"),
+    (re.compile(r'^\("?(.*?)"?\)'), "process"),
+]
+ID_RE = re.compile(r'([A-Za-z][A-Za-z0-9_]*)')
+CLASS_TYPE = {"external": "external", "wallet": "external", "ext": "external",
+              "backend": "backend", "back": "backend", "admin": "backend"}
+
+
+def parse_mermaid(src):
+    nodes, order, edges = {}, [], []
+
+    def ensure(nid, label=None, ntype=None):
+        if nid not in nodes:
+            nodes[nid] = {"id": nid, "type": "process", "label": [nid]}
+            order.append(nid)
+        if label is not None:
+            nodes[nid]["label"] = [l.strip() for l in label.split("<br>") if l.strip()]
+        if ntype is not None:
+            nodes[nid]["type"] = ntype
+
+    def eat_node(chunk):
+        """chunk 形如 'A["文本"]' 或 'A'，注册节点并返回 id。"""
+        m = ID_RE.match(chunk)
+        if not m:
+            return None
+        nid = m.group(1)
+        rest = chunk[m.end():]
+        for rx, ntype in NODE_SHAPES:
+            sm = rx.match(rest)
+            if sm:
+                ensure(nid, sm.group(1), ntype)
+                return nid
+        ensure(nid)
+        return nid
+
+    for raw in src.splitlines():
+        line = raw.strip()
+        if (not line or line.startswith("%%") or line.startswith("flowchart")
+                or line.startswith("graph") or line.startswith("classDef")):
+            continue
+        cm = re.match(r'^class\s+([\w,\s]+?)\s+(\w+);?$', line)
+        if cm:
+            t = CLASS_TYPE.get(cm.group(2).lower())
+            if t:
+                for nid in [x.strip() for x in cm.group(1).split(",")]:
+                    ensure(nid)
+                    nodes[nid]["type"] = t
+            continue
+        if "-->" in line or "-.->" in line:
+            parts = re.split(r'\s*(?:-->|-\.->)\s*', line)
+            for i in range(len(parts) - 1):
+                left, right = parts[i], parts[i + 1]
+                label = ""
+                lm = re.match(r'^\|(.*?)\|\s*(.*)$', right)
+                if lm:
+                    label, right = lm.group(1), lm.group(2)
+                a = eat_node(left.strip())
+                b = eat_node(right.strip())
+                if a and b:
+                    edges.append({"from": a, "to": b,
+                                  "label": [l for l in label.split("<br>") if l]})
+            continue
+        eat_node(line)
+
+    for n in nodes.values():
+        if n["type"] == "process" and any("（外部）" in l or "(外部)" in l for l in n["label"]):
+            n["type"] = "external"
+    return {"spec": SPEC_VERSION, "nodes": [nodes[i] for i in order], "edges": edges}
+
+
+def load_spec(path):
+    text = open(path, encoding="utf-8").read()
+    if path.endswith(".json"):
+        spec = json.loads(text)
+        got = spec.get("spec", "")
+        if not got.startswith("flowspec/"):
+            raise SystemExit("错误：缺少 spec 字段（期望 %s）" % SPEC_VERSION)
+        if got.split("/")[1].split(".")[0] != SPEC_VERSION.split("/")[1]:
+            raise SystemExit("错误：flowspec 主版本不兼容：%s（本工具支持 %s）" % (got, SPEC_VERSION))
+        for e in spec["edges"]:
+            if isinstance(e.get("label"), str):
+                e["label"] = [e["label"]] if e["label"] else []
+            e.setdefault("label", [])
+        for n in spec["nodes"]:
+            if isinstance(n.get("label"), str):
+                n["label"] = [n["label"]]
+            n.setdefault("type", "process")
+        return spec
+    return parse_mermaid(text)
+
+
+# ── 图分析层 ────────────────────────────────────────────────────────
+class Graph:
+    def __init__(self, spec, start=None):
+        self.nodes = {n["id"]: dict(n) for n in spec["nodes"]}
+        self.order = [n["id"] for n in spec["nodes"]]
+        self.edges = [dict(e) for e in spec["edges"]]
+        for nid in set(e["from"] for e in self.edges) | set(e["to"] for e in self.edges):
+            if nid not in self.nodes:
+                raise SystemExit("错误：边引用了未定义节点 %s" % nid)
+        self.out = {i: [] for i in self.order}
+        self.inn = {i: [] for i in self.order}
+        for e in self.edges:
+            self.out[e["from"]].append(e)
+            self.inn[e["to"]].append(e)
+        # 两阶段起点推断：先按声明序首节点标回边，再用 DAG 入度选正式起点
+        self.start = start or self.order[0]
+        self._mark_back_edges()
+        self.dout = {i: [e for e in self.out[i] if not e["back"]] for i in self.order}
+        self.dinn = {i: [e for e in self.inn[i] if not e["back"]] for i in self.order}
+        if not start:
+            cands = [i for i in self.order if not self.dinn[i]]
+            cands.sort(key=lambda i: (0 if self.nodes[i]["type"] in ("process", "decision") else 1,
+                                      self.order.index(i)))
+            if cands and cands[0] != self.start:
+                self.start = cands[0]
+                for e in self.edges:
+                    e["back"] = False
+                self._mark_back_edges()
+                self.dout = {i: [e for e in self.out[i] if not e["back"]] for i in self.order}
+                self.dinn = {i: [e for e in self.inn[i] if not e["back"]] for i in self.order}
+        self._desc_cache = {}
+
+    def _mark_back_edges(self):
+        state = {i: 0 for i in self.order}  # 0未访问 1栈上 2完成
+        def dfs(u):
+            state[u] = 1
+            for e in self.out[u]:
+                v = e["to"]
+                if state[v] == 1:
+                    e["back"] = True
+                elif state[v] == 0:
+                    e.setdefault("back", False)
+                    dfs(v)
+                else:
+                    e.setdefault("back", False)
+            state[u] = 2
+        roots = [self.start] + [i for i in self.order if not self.inn[i] and i != self.start]
+        for r in roots:
+            if state[r] == 0:
+                dfs(r)
+        for i in self.order:
+            if state[i] == 0:
+                dfs(i)
+        for e in self.edges:
+            e.setdefault("back", False)
+
+    def desc_count(self, nid):
+        if nid in self._desc_cache:
+            return self._desc_cache[nid]
+        seen, stack = set(), [nid]
+        while stack:
+            u = stack.pop()
+            for e in self.dout[u]:
+                if e["to"] not in seen:
+                    seen.add(e["to"])
+                    stack.append(e["to"])
+        self._desc_cache[nid] = len(seen)
+        return len(seen)
+
+    POS_LABELS = {"是", "有效", "通过", "成功", "完成", "已绑定", "已完善", "已实名",
+                  "已登录", "已开通", "已完成", "满足", "允许", "yes", "ok", "pass"}
+    NEG_WORDS = ("否", "不通过", "无效", "失效", "失败", "过期", "拒绝", "不满足", "no", "fail")
+
+    @classmethod
+    def label_score(cls, e):
+        text = "".join(e.get("label", []))
+        if not text:
+            return 0
+        if text.lower() in cls.POS_LABELS:
+            return 2
+        if text.startswith("未") or any(w in text.lower() for w in cls.NEG_WORDS):
+            return -2
+        return 0
+
+    def spine(self):
+        chain, cur, guard = [self.start], self.start, 0
+        while guard < 1000:
+            guard += 1
+            outs = self.dout[cur]
+            if not outs:
+                break
+            def rank(e):
+                t = self.nodes[e["to"]]
+                return (-Graph.label_score(e),
+                        0 if t["type"] in ("process", "decision") else 1,
+                        -len(self.dinn[e["to"]]),
+                        -self.desc_count(e["to"]))
+            outs = sorted(outs, key=rank)
+            nxt = outs[0]["to"]
+            if nxt in chain:
+                break
+            chain.append(nxt)
+            cur = nxt
+        return chain
+
+
+# ── 布局层 ──────────────────────────────────────────────────────────
+def node_size(n, st):
+    fs = st["fs_node"]
+    lines = n["label"]
+    widths = [text_width(l, fs if i == 0 or n["type"] != "process" else st["fs_sub"])
+              for i, l in enumerate(lines)]
+    tw = max(widths) if widths else 40
+    nl = len(lines)
+    if n["type"] == "decision":
+        w = max(150, tw * 1.55 + 24)
+        h = max(64, nl * (fs + 6) + 44)
+    else:
+        w = max(120, tw + 30)
+        h = max(36, nl * (fs + 5) + 18)
+    return round(w / 2) * 2, round(h / 2) * 2
+
+
+def wrap_label(lines, limit=13):
+    out = []
+    for l in lines:
+        while len(l) > limit:
+            out.append(l[:limit])
+            l = l[limit:]
+        out.append(l)
+    return out
+
+
+def layout(spec, start=None, style=None):
+    st = dict(DEFAULT_STYLE)
+    if style:
+        st.update(style)
+    g = Graph(spec, start)
+    spine = g.spine()
+    sset = set(spine)
+
+    lane_nodes, col = {}, {}
+    chains = []          # (anchor_spine_id, [chain node ids], merge_target or None)
+    for sid in spine:
+        for e in g.dout[sid]:
+            if e["to"] in sset or e["to"] in col:
+                continue
+            chain, cur = [], e["to"]
+            while cur not in sset and cur not in col:
+                chain.append(cur)
+                col[cur] = "R"
+                nxt = [x for x in g.dout[cur]]
+                if len(nxt) != 1:
+                    cur = None
+                    break
+                cur = nxt[0]["to"]
+            chains.append({"anchor": sid, "chain": chain,
+                           "merge": cur if (cur in sset) else None})
+    left_nodes = []
+    for nid in g.order:
+        if nid in sset or nid in col:
+            continue
+        if not g.dinn[nid] and len(g.dout[nid]) == 1 and g.dout[nid][0]["to"] in sset:
+            col[nid] = "L"
+            left_nodes.append(nid)
+    unplaced = [i for i in g.order if i not in sset and i not in col]
+    warnings = []
+    if unplaced:
+        raise SystemExit("错误：节点 %s 不符合『单主干+右分支+回线』适用形态，"
+                         "建议改用 mermaid 原生渲染。" % ",".join(unplaced))
+
+    N = {}
+    for nid in g.order:
+        n = dict(g.nodes[nid])
+        n["w"], n["h"] = node_size(n, st)
+        N[nid] = n
+
+    # 列宽与 x
+    def colw(ids):
+        return max([N[i]["w"] for i in ids]) if ids else 0
+    Lw = colw(left_nodes)
+    Sw = colw(spine)
+    Rids = [i for i in col if col[i] == "R"]
+    Rw = colw(Rids)
+    margin = 20
+    Lx = margin + Lw / 2 if left_nodes else 0
+    Sx = (margin + Lw + 70 + Sw / 2) if left_nodes else (margin + 60 + Sw / 2)
+    Rx = Sx + Sw / 2 + 120 + Rw / 2 if Rids else Sx
+    LANE = Rx + Rw / 2 + 42 if Rids else Sx + Sw / 2 + 42
+    W = LANE + 118
+
+    # 主干 y 初排
+    def edge_gap(e):
+        return 38 + 13 * max(0, len(e.get("label", [])))
+    y = 0
+    for i, sid in enumerate(spine):
+        n = N[sid]
+        if i == 0:
+            y = margin + n["h"] / 2 + 4
+        else:
+            prev = N[spine[i - 1]]
+            gap = 40
+            for e in g.dout[spine[i - 1]]:
+                if e["to"] == sid:
+                    gap = edge_gap(e)
+            y = prev["y"] + prev["h"] / 2 + gap + n["h"] / 2
+        n["y"] = y
+
+    # 右链排布 + 汇入约束（两遍收敛）
+    for _ in range(2):
+        for c in chains:
+            ay = N[c["anchor"]]["y"]
+            cy = ay
+            for k, nid in enumerate(c["chain"]):
+                n = N[nid]
+                if k == 0:
+                    n["y"] = ay
+                else:
+                    prev = N[c["chain"][k - 1]]
+                    n["y"] = prev["y"] + prev["h"] / 2 + 46 + n["h"] / 2
+                cy = n["y"] + n["h"] / 2
+            if c["merge"]:
+                t = N[c["merge"]]
+                need = cy + (52 if t["type"] == "decision" else 26)
+                min_top = need
+                if t["y"] - t["h"] / 2 < min_top:
+                    delta = min_top - (t["y"] - t["h"] / 2)
+                    started = False
+                    for sid in spine:
+                        if sid == c["merge"]:
+                            started = True
+                        if started:
+                            N[sid]["y"] += delta
+    for nid in left_nodes:
+        tgt = g.dout[nid][0]["to"]
+        N[nid]["y"] = N[tgt]["y"]
+    for nid in g.order:
+        N[nid]["x"] = {"L": Lx, "R": Rx}.get(col.get(nid), Sx)
+
+    H = max(n["y"] + n["h"] / 2 for n in N.values()) + margin + 10
+
+    # ── 右端口预扫与分配：前向汇入走上侧(-9,-18...)，回边走下侧(+9,+18...)，单入口居中 ──
+    plan = {}
+    for e in g.edges:
+        uses = None
+        if e["back"]:
+            uses = "back"
+        elif col.get(e["from"]) == "R" and e["to"] in sset and N[e["to"]]["type"] != "decision":
+            uses = "fwd"
+        if uses:
+            plan.setdefault(e["to"], {"fwd": [], "back": []})[uses].append(id(e))
+    port_off = {}
+    for nid, p in plan.items():
+        if len(p["fwd"]) + len(p["back"]) == 1:
+            only = (p["fwd"] + p["back"])[0]
+            port_off[only] = 0
+        else:
+            for i, eid in enumerate(p["fwd"]):
+                port_off[eid] = -9 * (i + 1)
+            for i, eid in enumerate(p["back"]):
+                port_off[eid] = 9 * (i + 1)
+    routes = []  # {pts, label, lx, ly, anchor, arrow}
+    spine_pairs = set(zip(spine, spine[1:]))
+    chain_of = {}
+    for c in chains:
+        for k, nid in enumerate(c["chain"]):
+            chain_of[nid] = (c, k)
+
+    def add(pts, e, lx=None, ly=None, anchor="start", arrow=True):
+        routes.append({"pts": pts, "label": wrap_label(e.get("label", []), 12),
+                       "lx": lx, "ly": ly, "anchor": anchor, "arrow": arrow})
+
+    for e in g.edges:
+        a, b = N[e["from"]], N[e["to"]]
+        if e["back"]:
+            sy = a["y"]
+            ty = b["y"] + port_off.get(id(e), 0)
+            pts = [(a["x"] + a["w"] / 2, sy), (LANE, sy), (LANE, ty), (b["x"] + b["w"] / 2, ty)]
+            add(pts, e, lx=LANE - 8, ly=(sy + ty) / 2, anchor="end")
+            continue
+        if (e["from"], e["to"]) in spine_pairs:
+            pts = [(Sx, a["y"] + a["h"] / 2), (Sx, b["y"] - b["h"] / 2)]
+            add(pts, e, lx=Sx + 8, ly=(a["y"] + a["h"] / 2 + b["y"] - b["h"] / 2) / 2 + 4)
+            continue
+        if e["from"] in sset and col.get(e["to"]) == "R":
+            x1, x2 = a["x"] + a["w"] / 2, b["x"] - b["w"] / 2
+            pts = [(x1, a["y"]), (x2, a["y"])]
+            add(pts, e, lx=(x1 + x2) / 2, ly=a["y"] - 8, anchor="middle")
+            continue
+        if col.get(e["from"]) == "R" and col.get(e["to"]) == "R":
+            pts = [(Rx, a["y"] + a["h"] / 2), (Rx, b["y"] - b["h"] / 2)]
+            add(pts, e, lx=Rx + 8, ly=(a["y"] + a["h"] / 2 + b["y"] - b["h"] / 2) / 2 + 4)
+            continue
+        if col.get(e["from"]) == "R" and e["to"] in sset:
+            if b["type"] == "decision":
+                prev_i = spine.index(e["to"]) - 1
+                prev = N[spine[prev_i]] if prev_i >= 0 else None
+                merge_y = ((prev["y"] + prev["h"] / 2) + (b["y"] - b["h"] / 2)) / 2 if prev else b["y"] - b["h"] / 2 - 24
+                pts = [(Rx, a["y"] + a["h"] / 2), (Rx, merge_y), (Sx, merge_y)]
+                add(pts, e, lx=(Sx + Rx) / 2, ly=merge_y - 8, anchor="middle", arrow=False)
+            else:
+                ty = b["y"] + port_off.get(id(e), 0)
+                pts = [(Rx, a["y"] + a["h"] / 2), (Rx, ty), (b["x"] + b["w"] / 2, ty)]
+                add(pts, e, lx=Rx + 8, ly=(a["y"] + a["h"] / 2 + ty) / 2)
+            continue
+        if col.get(e["from"]) == "L":
+            x1, x2 = a["x"] + a["w"] / 2, b["x"] - b["w"] / 2
+            if x2 - x1 < 90:
+                add([(x1, b["y"]), (x2, b["y"])], e, lx=a["x"], ly=a["y"] - a["h"] / 2 - 10 - 13 * max(0, len(e.get("label", [])) - 1), anchor="middle")
+            else:
+                add([(x1, b["y"]), (x2, b["y"])], e, lx=(x1 + x2) / 2, ly=b["y"] - 8, anchor="middle")
+            continue
+        warnings.append("边 %s→%s 使用了通用回退路由" % (e["from"], e["to"]))
+        add([(a["x"], a["y"] + a["h"] / 2), (a["x"], b["y"] - b["h"] / 2)], e)
+
+    # ── 交叉检测（正交线段） ──
+    segs = []
+    for ri, r in enumerate(routes):
+        p = r["pts"]
+        for i in range(len(p) - 1):
+            segs.append((p[i], p[i + 1], ri))
+    crossings = []
+    for i in range(len(segs)):
+        for j in range(i + 1, len(segs)):
+            (a1, a2, r1), (b1, b2, r2) = segs[i], segs[j]
+            if r1 == r2:
+                continue
+            ah = abs(a1[1] - a2[1]) < 0.01
+            bh = abs(b1[1] - b2[1]) < 0.01
+            if ah == bh:
+                continue
+            hseg, vseg = ((a1, a2), (b1, b2)) if ah else ((b1, b2), (a1, a2))
+            hy = hseg[0][1]
+            hx1, hx2 = sorted((hseg[0][0], hseg[1][0]))
+            vx = vseg[0][0]
+            vy1, vy2 = sorted((vseg[0][1], vseg[1][1]))
+            if hx1 < vx < hx2 and vy1 < hy < vy2:
+                endpoints = [hseg[0], hseg[1], vseg[0], vseg[1]]
+                if any(abs(px - vx) < 0.01 and abs(py - hy) < 0.01 for px, py in endpoints):
+                    continue
+                crossings.append({"at": [round(vx), round(hy)]})
+
+    return {"nodes": N, "order": g.order, "routes": routes, "spine": spine,
+            "W": round(W), "H": round(H), "style": st,
+            "crossings": crossings, "warnings": warnings, "col": col}
+
+
+# ── 渲染层 ──────────────────────────────────────────────────────────
+def render_svg(lay, title=""):
+    st = lay["style"]
+    out = []
+    out.append('<svg id="flowsvg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" '
+               'width="%d" height="%d" data-flowspec="1" font-family="%s">'
+               % (lay["W"], lay["H"], lay["W"], lay["H"], st["font_family"]))
+    out.append('<defs><marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" '
+               'markerHeight="7" orient="auto-start-reverse">'
+               '<path d="M0,0 L10,5 L0,10 z" fill="%s"/></marker></defs>' % st["edge_color"])
+    for r in lay["routes"]:
+        p = " ".join("%g,%g" % (x, y) for x, y in r["pts"])
+        m = ' marker-end="url(#arw)"' if r["arrow"] else ""
+        out.append('<polyline points="%s" fill="none" stroke="%s" stroke-width="1.5"%s/>'
+                   % (p, st["edge_color"], m))
+        if r["label"] and r["lx"] is not None:
+            for i, t in enumerate(r["label"]):
+                out.append('<text x="%g" y="%g" font-size="%d" fill="%s" text-anchor="%s">%s</text>'
+                           % (r["lx"], r["ly"] + i * 13, st["fs_label"], st["label_color"], r["anchor"], esc(t)))
+    for i, nid in enumerate(lay["order"]):
+        n = lay["nodes"][nid]
+        cx, cy, w, h, typ = n["x"], n["y"], n["w"], n["h"], n["type"]
+        clickable = '' if typ == "decision" else ' data-node="%s"' % nid
+        out.append('<g class="node" id="flowchart-%s-%d"%s>' % (nid, i, clickable))
+        if typ == "decision":
+            pts = "%g,%g %g,%g %g,%g %g,%g" % (cx, cy - h / 2, cx + w / 2, cy, cx, cy + h / 2, cx - w / 2, cy)
+            out.append('<polygon points="%s" fill="%s" stroke="%s" stroke-width="1.3"/>'
+                       % (pts, st["fill_decision"], st["stroke_decision"]))
+        else:
+            dash = ' stroke-dasharray="5 4"' if typ == "external" else ""
+            sw = "1.5" if typ == "process" else "1.3"
+            out.append('<rect x="%g" y="%g" width="%g" height="%g" rx="4" fill="%s" stroke="%s" stroke-width="%s"%s/>'
+                       % (cx - w / 2, cy - h / 2, w, h, st["fill_" + typ], st["stroke_" + typ], sw, dash))
+            if typ == "backend":
+                for dx in (cx - w / 2 + 6, cx + w / 2 - 6):
+                    out.append('<line x1="%g" y1="%g" x2="%g" y2="%g" stroke="%s" stroke-width="1.3"/>'
+                               % (dx, cy - h / 2, dx, cy + h / 2, st["stroke_backend"]))
+        nl = len(n["label"])
+        for j, t in enumerate(n["label"]):
+            fs = st["fs_node"] if (j == 0 or typ == "decision") else st["fs_sub"]
+            ty = cy + (j - (nl - 1) / 2) * (fs + 4) + fs * 0.35
+            out.append('<text x="%g" y="%g" font-size="%d" fill="%s" text-anchor="middle">%s</text>'
+                       % (cx, ty, fs, st["text_" + typ], esc(t)))
+        out.append('</g>')
+    out.append('<rect id="sel-ring" fill="%s" stroke="%s" stroke-width="2" '
+               'stroke-dasharray="5 4" rx="6" visibility="hidden"/>'
+               % (st["sel_ring_fill"], st["sel_ring_stroke"]))
+    out.append('</svg>')
+    return "\n".join(out)
+
+
+def esc(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+HTML_SHELL = """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>__TITLE__</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: #f7f7f7; font-family: __FONT__; color: #333; }
+.wrap { display: flex; flex-direction: column; height: 100vh; padding: 16px; gap: 10px; }
+.bar { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #888; }
+.bar .t { font-size: 15px; font-weight: 700; color: #333; margin-right: auto; }
+.zb { padding: 2px 10px; border: 1px solid #c0c0c0; border-radius: 4px; cursor: pointer; background: #fff; user-select: none; color: #333; }
+.zv { min-width: 40px; text-align: center; }
+.cv { flex: 1; min-height: 0; overflow: hidden; border: 1px solid #e0e0e0; border-radius: 6px; background: #fff; cursor: grab; touch-action: none; user-select: none; }
+.cv:active { cursor: grabbing; }
+.inner { transform-origin: 0 0; will-change: transform; }
+.inner svg { width: 100%; height: auto; display: block; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <span class="t">__TITLE__</span>
+    <span class="zb" onclick="setZoom(-1)">&#65293;</span>
+    <span class="zv" id="zv">100%</span>
+    <span class="zb" onclick="setZoom(1)">&#65291;</span>
+    <span class="zb" onclick="setZoom(0)">适宽</span>
+  </div>
+  <div class="cv" id="cv"><div class="inner" id="inner">__SVG__</div></div>
+</div>
+<script>
+var zoom = 100, px = 0, py = 0;
+function apply() { document.getElementById('inner').style.transform = 'translate(' + px + 'px,' + py + 'px)'; }
+function setZoom(d) {
+  zoom = (d === 0) ? 100 : Math.min(300, Math.max(100, zoom + d * 40));
+  if (d === 0) { px = 0; py = 0; apply(); }
+  var svg = document.querySelector('#inner svg');
+  if (svg) svg.style.width = zoom + '%';
+  document.getElementById('zv').textContent = zoom + '%';
+}
+(function () {
+  var cv = document.getElementById('cv');
+  var drag = false, sx = 0, sy = 0, ox = 0, oy = 0;
+  cv.addEventListener('pointerdown', function (e) { drag = true; sx = e.clientX; sy = e.clientY; ox = px; oy = py; });
+  window.addEventListener('pointermove', function (e) { if (!drag) return; px = ox + e.clientX - sx; py = oy + e.clientY - sy; apply(); });
+  window.addEventListener('pointerup', function () { drag = false; });
+})();
+</script>
+</body>
+</html>
+"""
+
+
+def render_html(lay, title):
+    svg = render_svg(lay, title)
+    return (HTML_SHELL.replace("__TITLE__", esc(title or "流程图"))
+            .replace("__FONT__", lay["style"]["font_family"])
+            .replace("__SVG__", svg))
+
+
+# ── 入口 ────────────────────────────────────────────────────────────
+def main():
+    ap = argparse.ArgumentParser(description="flow-canvas 正交流程图布局器")
+    ap.add_argument("input")
+    ap.add_argument("-o", "--output")
+    ap.add_argument("--html", action="store_true")
+    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--title", default="")
+    ap.add_argument("--start", default=None)
+    ap.add_argument("--style", default=None, help="样式覆盖 JSON 文件")
+    args = ap.parse_args()
+
+    spec = load_spec(args.input)
+    bad = []
+    for n in spec["nodes"]:
+        for l in n["label"]:
+            bad += find_emoji(l)
+    for e in spec["edges"]:
+        for l in e.get("label", []):
+            bad += find_emoji(l)
+    if bad:
+        raise SystemExit("错误：输入含 emoji 字符 %s（本工具产物禁用 emoji）" % bad)
+
+    style = json.loads(open(args.style, encoding="utf-8").read()) if args.style else None
+    lay = layout(spec, args.start, style)
+
+    report = {
+        "nodes": len(spec["nodes"]), "edges": len(spec["edges"]),
+        "spine": lay["spine"], "crossings": len(lay["crossings"]),
+        "crossing_points": lay["crossings"], "warnings": lay["warnings"],
+        "canvas": [lay["W"], lay["H"]],
+    }
+    if lay["crossings"]:
+        report["warnings"].append("检测到 %d 处线段交叉" % len(lay["crossings"]))
+    if len(lay["crossings"]) > 3:
+        report["warnings"].append("交叉过多：该图不适合正交模式，建议使用 mermaid 原生渲染")
+
+    if args.check:
+        print(json.dumps(report, ensure_ascii=False, indent=1))
+        return
+    if not args.output:
+        raise SystemExit("错误：需要 -o 指定输出文件（或使用 --check）")
+    content = render_html(lay, args.title) if args.html else render_svg(lay, args.title)
+    with open(args.output, "w", encoding="utf-8", newline="\n") as f:
+        f.write(content)
+    print(json.dumps(report, ensure_ascii=False))
+    print("已生成 %s" % args.output)
+
+
+if __name__ == "__main__":
+    main()

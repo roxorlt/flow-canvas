@@ -1,0 +1,28 @@
+display_name: Flow Canvas
+display_text: 把业务流程渲染成横平竖直的正交规范流程图（SVG / 可缩放拖拽 HTML 画布）
+default_prompt: 用 flow-canvas 把这份流程画成规范流程图
+activation:
+  mode: model-invoked
+  triggers:
+    - 画个流程图 / 业务流程图
+    - 审批流、开通流程、申请流程画图
+    - 把 mermaid 转成规范流程图 / 流程图横平竖直
+    - 评审用的流程图
+    - render orthogonal flowchart
+  anti_triggers:
+    - 只要 mermaid 源码文本
+    - 时序图 / 甘特图 / 架构图 / 脑图
+execution_context:
+  runtime: python3 >= 3.8（仅标准库，零第三方依赖）
+  entry: scripts/flowlayout.py
+  network: none
+  filesystem: 仅写调用方指定的输出路径
+trust:
+  dependencies: none
+  network_access: none
+  telemetry: none
+adapter_targets: [claude, openai, generic]
+degradation:
+  - no_python3: 按 contract/flowspec-v1.md 布局规则手工生成 SVG（无自动交叉检测，质量降级并告知用户）
+  - shape_mismatch: 布局器对不适用形态明确报错，降级为 mermaid 原生渲染
+  - crossings_gt_3: 建议 mermaid 原生渲染，不交付带交叉产物
