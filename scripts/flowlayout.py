@@ -20,6 +20,11 @@
   python3 flowlayout.py input.mmd  --check          # 仅输出布局检查报告 JSON
   python3 flowlayout.py input.mmd  -o out.svg --style style.json   # 覆盖样式变量
 """
+import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 import json
 import re
 import sys
