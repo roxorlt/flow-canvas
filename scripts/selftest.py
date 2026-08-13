@@ -91,7 +91,7 @@ def main():
     lft = os.path.join(tmp, "left.mmd")
     with open(lft, "w", encoding="utf-8") as f:
         f.write("flowchart TD\nA[开始] --> B{校验？}\nB -->|否| P[人工核对]\nP --> DD\n"
-                "B -->|是| CC[自动通过]\nCC --> DD[汇总]\nDD --> EE[完成]\n")
+                "P -->|重新校验| B\nB -->|是| CC[自动通过]\nCC --> DD[汇总]\nDD --> EE[完成]\n")
     p = run([lft, "--check", "--left", "P"])
     ok = p.returncode == 0
     rep4 = json.loads(p.stdout) if ok else {}

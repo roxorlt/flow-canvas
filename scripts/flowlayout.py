@@ -509,6 +509,12 @@ def layout(spec, start=None, style=None, force_spine=None, force_left=None):
     for e in g.edges:
         a, b = N[e["from"]], N[e["to"]]
         if e["back"]:
+            if col.get(e["from"]) == "L" and e["to"] in sset:
+                # 左列节点回边：从节点顶部向上，左侧 T 形汇入目标顶部上方的主干线
+                merge_y = b["y"] - b["h"] / 2 - 18
+                pts = [(a["x"], a["y"] - a["h"] / 2), (a["x"], merge_y), (Sx, merge_y)]
+                add(pts, e, lx=(a["x"] + Sx) / 2, ly=merge_y - 8, anchor="middle", arrow=False)
+                continue
             sy = a["y"]
             ty = b["y"] + port_off.get(id(e), 0)
             pts = [(a["x"] + a["w"] / 2, sy), (LANE, sy), (LANE, ty), (b["x"] + b["w"] / 2, ty)]
