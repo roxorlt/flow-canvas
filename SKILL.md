@@ -18,13 +18,15 @@ description: 把业务流程渲染成横平竖直的正交规范流程图（SVG 
    python3 scripts/flowlayout.py input.mmd -o out.svg                 # 纯 SVG
    python3 scripts/flowlayout.py input.mmd -o out.html --html --title "标题"   # 可缩放拖拽画布
    python3 scripts/flowlayout.py input.mmd --check                    # 仅布局检查报告
+   python3 scripts/flowlayout.py input.mmd -o out.svg --spine A,B,C   # 强制主干顺序
    ```
+   自动主干选择按"边标签语义→节点类型→入度→后代数"排序，业务主链路与之不符时（如主干需走"否"分支），用 `--spine` 显式指定主干节点序列。
 3. **读脚本输出的报告 JSON**：`crossings` 必须为 0 才算合格；有交叉时先检查输入（判断节点出边是否都有是/否类标签），仍无法消除或报"不适合正交模式"时，明确告知用户并降级为 mermaid 原生渲染，**不要交付带交叉的图**。
 4. 产物默认灰度线框、无 emoji（脚本硬校验）。调用方项目有自己的样式规范时，写一个覆盖 JSON 通过 `--style` 传入（可覆盖键见脚本 `DEFAULT_STYLE`）；未声明则使用默认。
 
 ## 适用形态与降级
 
-布局器适用"单主干 + 右侧分支/分支链 + 直角回线 + 左侧旁路源"形态（业务审批/开通/申请流程的典型形状）。不符合时脚本会明确报错而不是产出烂图——此时告知用户该图更适合 mermaid 原生渲染。
+布局器适用"单主干 + 右侧分支/分支链 + 直角回线 + 左侧旁路源 + 主干跳级边"形态（业务审批/开通/申请流程的典型形状）。主干跳级边（首尾都在主干、非相邻的前向边）：目标为判断节点时走右侧前向通道 T 形汇入其顶部，其余走左侧远端通道进左端口。不符合时脚本会明确报错而不是产出烂图——此时告知用户该图更适合 mermaid 原生渲染。
 
 ## 环境降级
 
@@ -37,4 +39,4 @@ SVG 根元素带 `data-flowspec="1"`；每个可交互节点是 `<g class="node"
 
 ## 自检
 
-安装后运行 `python3 scripts/selftest.py`（17 项断言，含 golden 样例与形态降级检查），全部 PASS 才算可用。
+安装后运行 `python3 scripts/selftest.py`（19 项断言，含 golden 样例、强制主干/跳级边与形态降级检查），全部 PASS 才算可用。

@@ -76,6 +76,17 @@ def main():
         html = open(html_path, encoding="utf-8").read() if p2.returncode == 0 else ""
         check("HTML 画布模式生成", p2.returncode == 0 and "setZoom" in html and "pointerdown" in html)
 
+    # ── 强制主干 + 主干跳级边 ──
+    skip = os.path.join(tmp, "skip.mmd")
+    with open(skip, "w", encoding="utf-8") as f:
+        f.write("flowchart TD\nA[开始] --> B{校验一？}\nB -->|是| C{校验二？}\nB -->|否| E\n"
+                "C -->|不满足| E[基础通道]\nC -->|满足| G\nE --> F[提交]\nF --> G{终审？}\nG -->|通过| H[完成]\n")
+    p = run([skip, "--check", "--spine", "A,B,C,E,F,G,H"])
+    ok = p.returncode == 0
+    rep3 = json.loads(p.stdout) if ok else {}
+    check("--spine 强制主干生效", ok and rep3.get("spine") == list("ABCEFGH"), str(rep3.get("spine")))
+    check("主干跳级边零交叉", ok and rep3.get("crossings") == 0, str(rep3.get("crossings")))
+
     # ── 形态降级检查：不适用图应明确报错而非产出烂图 ──
     bad = os.path.join(tmp, "bad.mmd")
     with open(bad, "w", encoding="utf-8") as f:

@@ -9,7 +9,9 @@
   - 主干节点排纵向主列，分支节点排右列并与判断节点垂直居中对齐；
   - 判断菱形为扁菱形；"否"类分支从右侧水平顶点出线，主干从底部顶点出线；
   - 回边走最右侧通道，90 度折线，进入目标右侧端口（多入口自动错位）；
-  - 分支链汇回主干：目标为判断节点时 T 形汇入主干线，目标为普通节点时进右端口；
+  - 分支链汇回主干：目标为判断节点时 T 形汇入主干线（目标顶部上方 18px），目标为普通节点时进右端口；
+  - 主干跳级边（首尾都在主干、非相邻的前向边）：目标为判断节点时走右侧前向通道 T 形汇入，
+    其余走左侧远端通道进目标左端口；
   - 无入边的旁路源节点排左列，与目标水平对齐；
   - 输出前自动做线段交叉检测，交叉数超过阈值时建议降级为 mermaid 原生渲染。
 
@@ -19,6 +21,7 @@
   python3 flowlayout.py input.json -o out.svg
   python3 flowlayout.py input.mmd  --check          # 仅输出布局检查报告 JSON
   python3 flowlayout.py input.mmd  -o out.svg --style style.json   # 覆盖样式变量
+  python3 flowlayout.py input.mmd  -o out.svg --spine A,B,C        # 强制主干顺序（覆盖自动选择）
 """
 import sys
 
@@ -304,13 +307,23 @@ def wrap_label(lines, limit=13):
     return out
 
 
-def layout(spec, start=None, style=None):
+def layout(spec, start=None, style=None, force_spine=None):
     st = dict(DEFAULT_STYLE)
     if style:
         st.update(style)
-    g = Graph(spec, start)
-    spine = g.spine()
+    g = Graph(spec, start or (force_spine[0] if force_spine else None))
+    if force_spine:
+        for nid in force_spine:
+            if nid not in g.nodes:
+                raise SystemExit("错误：--spine 指定了不存在的节点 %s" % nid)
+        for u, v in zip(force_spine, force_spine[1:]):
+            if not any(e["to"] == v for e in g.dout[u]):
+                raise SystemExit("错误：--spine 相邻节点 %s→%s 之间不存在前向边" % (u, v))
+        spine = list(force_spine)
+    else:
+        spine = g.spine()
     sset = set(spine)
+    spine_pairs = set(zip(spine, spine[1:]))
 
     lane_nodes, col = {}, {}
     chains = []          # (anchor_spine_id, [chain node ids], merge_target or None)
@@ -361,6 +374,28 @@ def layout(spec, start=None, style=None):
     Rx = Sx + Sw / 2 + 120 + Rw / 2 if Rids else Sx
     LANE = Rx + Rw / 2 + 42 if Rids else Sx + Sw / 2 + 42
     W = LANE + 118
+
+    # ── 主干跳级边（首尾都在主干、非相邻、非回边的前向边）通道分配 ──
+    # decision 目标走右侧前向通道（LANE 外侧）T 形汇入；其余走左侧远端通道进左端口。
+    # 通道按跨度升序由内向外分配；几何冲突由末端交叉检测兜底。
+    sidx = {nid: i for i, nid in enumerate(spine)}
+    skipR, skipL = [], []
+    for e in g.edges:
+        if (e["back"] or e["from"] not in sset or e["to"] not in sset
+                or (e["from"], e["to"]) in spine_pairs):
+            continue
+        if sidx[e["from"]] >= sidx[e["to"]]:
+            continue
+        (skipR if g.nodes[e["to"]]["type"] == "decision" else skipL).append(e)
+    skipR.sort(key=lambda e: sidx[e["to"]] - sidx[e["from"]])
+    skipL.sort(key=lambda e: sidx[e["to"]] - sidx[e["from"]])
+    skip_lane = {}
+    for k, e in enumerate(skipR):
+        skip_lane[id(e)] = LANE + 26 + 18 * k
+    for k, e in enumerate(skipL):
+        skip_lane[id(e)] = 12 + 16 * k
+    if skipR:
+        W = max(W, max(skip_lane[id(e)] for e in skipR) + 60)
 
     # 主干 y 初排
     def edge_gap(e):
@@ -433,7 +468,6 @@ def layout(spec, start=None, style=None):
             for i, eid in enumerate(p["back"]):
                 port_off[eid] = 9 * (i + 1)
     routes = []  # {pts, label, lx, ly, anchor, arrow}
-    spine_pairs = set(zip(spine, spine[1:]))
     chain_of = {}
     for c in chains:
         for k, nid in enumerate(c["chain"]):
@@ -455,10 +489,22 @@ def layout(spec, start=None, style=None):
             pts = [(Sx, a["y"] + a["h"] / 2), (Sx, b["y"] - b["h"] / 2)]
             add(pts, e, lx=Sx + 8, ly=(a["y"] + a["h"] / 2 + b["y"] - b["h"] / 2) / 2 + 4)
             continue
+        if id(e) in skip_lane:
+            lx0 = skip_lane[id(e)]
+            lift = 8 + 13 * max(0, len(wrap_label(e.get("label", []), 12)) - 1)
+            if b["type"] == "decision":
+                merge_y = b["y"] - b["h"] / 2 - 18
+                pts = [(a["x"] + a["w"] / 2, a["y"]), (lx0, a["y"]), (lx0, merge_y), (Sx, merge_y)]
+                add(pts, e, lx=(a["x"] + a["w"] / 2 + lx0) / 2, ly=a["y"] - lift, anchor="middle", arrow=False)
+            else:
+                pts = [(a["x"] - a["w"] / 2, a["y"]), (lx0, a["y"]), (lx0, b["y"]), (b["x"] - b["w"] / 2, b["y"])]
+                add(pts, e, lx=(a["x"] - a["w"] / 2 + lx0) / 2, ly=a["y"] - lift, anchor="middle")
+            continue
         if e["from"] in sset and col.get(e["to"]) == "R":
             x1, x2 = a["x"] + a["w"] / 2, b["x"] - b["w"] / 2
             pts = [(x1, a["y"]), (x2, a["y"])]
-            add(pts, e, lx=(x1 + x2) / 2, ly=a["y"] - 8, anchor="middle")
+            wl = wrap_label(e.get("label", []), 12)
+            add(pts, e, lx=(x1 + x2) / 2, ly=a["y"] - 8 - 13 * max(0, len(wl) - 1), anchor="middle")
             continue
         if col.get(e["from"]) == "R" and col.get(e["to"]) == "R":
             pts = [(Rx, a["y"] + a["h"] / 2), (Rx, b["y"] - b["h"] / 2)]
@@ -466,9 +512,7 @@ def layout(spec, start=None, style=None):
             continue
         if col.get(e["from"]) == "R" and e["to"] in sset:
             if b["type"] == "decision":
-                prev_i = spine.index(e["to"]) - 1
-                prev = N[spine[prev_i]] if prev_i >= 0 else None
-                merge_y = ((prev["y"] + prev["h"] / 2) + (b["y"] - b["h"] / 2)) / 2 if prev else b["y"] - b["h"] / 2 - 24
+                merge_y = b["y"] - b["h"] / 2 - 18
                 pts = [(Rx, a["y"] + a["h"] / 2), (Rx, merge_y), (Sx, merge_y)]
                 add(pts, e, lx=(Sx + Rx) / 2, ly=merge_y - 8, anchor="middle", arrow=False)
             else:
@@ -644,6 +688,7 @@ def main():
     ap.add_argument("--title", default="")
     ap.add_argument("--start", default=None)
     ap.add_argument("--style", default=None, help="样式覆盖 JSON 文件")
+    ap.add_argument("--spine", default=None, help="逗号分隔节点 id，强制指定主干顺序（覆盖自动主干选择）")
     args = ap.parse_args()
 
     spec = load_spec(args.input)
@@ -658,7 +703,8 @@ def main():
         raise SystemExit("错误：输入含 emoji 字符 %s（本工具产物禁用 emoji）" % bad)
 
     style = json.loads(open(args.style, encoding="utf-8").read()) if args.style else None
-    lay = layout(spec, args.start, style)
+    force = [s.strip() for s in args.spine.split(",") if s.strip()] if args.spine else None
+    lay = layout(spec, args.start, style, force)
 
     report = {
         "nodes": len(spec["nodes"]), "edges": len(spec["edges"]),
