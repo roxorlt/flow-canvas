@@ -12,7 +12,8 @@
   - 分支链汇回主干：目标为判断节点时 T 形汇入主干线（目标顶部上方 18px），目标为普通节点时进右端口；
   - 主干跳级边（首尾都在主干、非相邻的前向边）：目标为判断节点时走右侧前向通道 T 形汇入，
     其余走左侧远端通道进目标左端口；
-  - 无入边的旁路源节点排左列，与目标水平对齐；
+  - 无入边的旁路源节点排左列，与目标水平对齐；--left 可把分支链改放左列
+    （与右链镜像，经左侧远端通道汇入目标左端口），用于避开右侧通道冲突；
   - 输出前自动做线段交叉检测，交叉数超过阈值时建议降级为 mermaid 原生渲染。
 
 用法：
@@ -307,7 +308,7 @@ def wrap_label(lines, limit=13):
     return out
 
 
-def layout(spec, start=None, style=None, force_spine=None):
+def layout(spec, start=None, style=None, force_spine=None, force_left=None):
     st = dict(DEFAULT_STYLE)
     if style:
         st.update(style)
@@ -325,22 +326,32 @@ def layout(spec, start=None, style=None, force_spine=None):
     sset = set(spine)
     spine_pairs = set(zip(spine, spine[1:]))
 
+    force_left = set(force_left or [])
+    for nid in force_left:
+        if nid not in g.nodes:
+            raise SystemExit("错误：--left 指定了不存在的节点 %s" % nid)
+        if nid in sset:
+            raise SystemExit("错误：--left 节点 %s 在主干上，不能放左列" % nid)
     lane_nodes, col = {}, {}
-    chains = []          # (anchor_spine_id, [chain node ids], merge_target or None)
+    left_chain = set()
+    chains = []          # {anchor, chain[], merge, side}
     for sid in spine:
         for e in g.dout[sid]:
             if e["to"] in sset or e["to"] in col:
                 continue
+            side = "L" if e["to"] in force_left else "R"
             chain, cur = [], e["to"]
             while cur not in sset and cur not in col:
                 chain.append(cur)
-                col[cur] = "R"
+                col[cur] = side
+                if side == "L":
+                    left_chain.add(cur)
                 nxt = [x for x in g.dout[cur]]
                 if len(nxt) != 1:
                     cur = None
                     break
                 cur = nxt[0]["to"]
-            chains.append({"anchor": sid, "chain": chain,
+            chains.append({"anchor": sid, "chain": chain, "side": side,
                            "merge": cur if (cur in sset) else None})
     left_nodes = []
     for nid in g.order:
@@ -349,6 +360,9 @@ def layout(spec, start=None, style=None, force_spine=None):
         if not g.dinn[nid] and len(g.dout[nid]) == 1 and g.dout[nid][0]["to"] in sset:
             col[nid] = "L"
             left_nodes.append(nid)
+    for nid in force_left:
+        if nid not in left_chain:
+            raise SystemExit("错误：--left 节点 %s 不是主干分支链节点" % nid)
     unplaced = [i for i in g.order if i not in sset and i not in col]
     warnings = []
     if unplaced:
@@ -361,22 +375,9 @@ def layout(spec, start=None, style=None, force_spine=None):
         n["w"], n["h"] = node_size(n, st)
         N[nid] = n
 
-    # 列宽与 x
-    def colw(ids):
-        return max([N[i]["w"] for i in ids]) if ids else 0
-    Lw = colw(left_nodes)
-    Sw = colw(spine)
-    Rids = [i for i in col if col[i] == "R"]
-    Rw = colw(Rids)
-    margin = 20
-    Lx = margin + Lw / 2 if left_nodes else 0
-    Sx = (margin + Lw + 70 + Sw / 2) if left_nodes else (margin + 60 + Sw / 2)
-    Rx = Sx + Sw / 2 + 120 + Rw / 2 if Rids else Sx
-    LANE = Rx + Rw / 2 + 42 if Rids else Sx + Sw / 2 + 42
-    W = LANE + 118
-
-    # ── 主干跳级边（首尾都在主干、非相邻、非回边的前向边）通道分配 ──
-    # decision 目标走右侧前向通道（LANE 外侧）T 形汇入；其余走左侧远端通道进左端口。
+    # ── 主干跳级边（首尾都在主干、非相邻、非回边的前向边）与左链汇入边收集 ──
+    # 跳级边：decision 目标走右侧前向通道（LANE 外侧）T 形汇入；其余走左侧远端通道进左端口。
+    # 左列分支链（--left）汇入边：同走左侧远端通道进目标左端口。
     # 通道按跨度升序由内向外分配；几何冲突由末端交叉检测兜底。
     sidx = {nid: i for i, nid in enumerate(spine)}
     skipR, skipL = [], []
@@ -389,11 +390,39 @@ def layout(spec, start=None, style=None, force_spine=None):
         (skipR if g.nodes[e["to"]]["type"] == "decision" else skipL).append(e)
     skipR.sort(key=lambda e: sidx[e["to"]] - sidx[e["from"]])
     skipL.sort(key=lambda e: sidx[e["to"]] - sidx[e["from"]])
+    lmerge = []
+    for c in chains:
+        if c["side"] == "L" and c["merge"] and c["chain"]:
+            for e in g.dout[c["chain"][-1]]:
+                if e["to"] == c["merge"]:
+                    lmerge.append(e)
+    lane_extra = 16 * max(0, len(skipL) + len(lmerge) - 1)
+
+    # 列宽与 x
+    def colw(ids):
+        return max([N[i]["w"] for i in ids]) if ids else 0
+    Lids = [i for i in col if col[i] == "L"]
+    Lw = colw(Lids)
+    Sw = colw(spine)
+    Rids = [i for i in col if col[i] == "R"]
+    Rw = colw(Rids)
+    margin = 20
+    Lx = margin + lane_extra + Lw / 2 if Lids else 0
+    Sx = (margin + lane_extra + Lw + 70 + Sw / 2) if Lids else (margin + 60 + Sw / 2)
+    Rx = Sx + Sw / 2 + 120 + Rw / 2 if Rids else Sx
+    LANE = Rx + Rw / 2 + 42 if Rids else Sx + Sw / 2 + 42
+    W = LANE + 118
+
     skip_lane = {}
     for k, e in enumerate(skipR):
         skip_lane[id(e)] = LANE + 26 + 18 * k
-    for k, e in enumerate(skipL):
-        skip_lane[id(e)] = 12 + 16 * k
+    # 左侧通道统一分配：目标越深（主干序越靠后）越靠外（x 越小），
+    # 嵌套跨度时入线不会穿越内侧通道；交错跨度无解，由交叉检测兜底报告。
+    left_users = [(e, "skip") for e in skipL] + [(e, "merge") for e in lmerge]
+    left_users.sort(key=lambda t: -sidx[t[0]["to"]])
+    lmerge_lane = {}
+    for k, (e, kind) in enumerate(left_users):
+        (skip_lane if kind == "skip" else lmerge_lane)[id(e)] = 12 + 16 * k
     if skipR:
         W = max(W, max(skip_lane[id(e)] for e in skipR) + 60)
 
@@ -500,6 +529,12 @@ def layout(spec, start=None, style=None, force_spine=None):
                 pts = [(a["x"] - a["w"] / 2, a["y"]), (lx0, a["y"]), (lx0, b["y"]), (b["x"] - b["w"] / 2, b["y"])]
                 add(pts, e, lx=(a["x"] - a["w"] / 2 + lx0) / 2, ly=a["y"] - lift, anchor="middle")
             continue
+        if id(e) in lmerge_lane:
+            lx0 = lmerge_lane[id(e)]
+            pts = [(a["x"] - a["w"] / 2, a["y"]), (lx0, a["y"]), (lx0, b["y"]), (b["x"] - b["w"] / 2, b["y"])]
+            wl = wrap_label(e.get("label", []), 12)
+            add(pts, e, lx=(lx0 + b["x"] - b["w"] / 2) / 2, ly=b["y"] - 8 - 13 * max(0, len(wl) - 1), anchor="middle")
+            continue
         if e["from"] in sset and col.get(e["to"]) == "R":
             x1, x2 = a["x"] + a["w"] / 2, b["x"] - b["w"] / 2
             pts = [(x1, a["y"]), (x2, a["y"])]
@@ -519,6 +554,16 @@ def layout(spec, start=None, style=None, force_spine=None):
                 ty = b["y"] + port_off.get(id(e), 0)
                 pts = [(Rx, a["y"] + a["h"] / 2), (Rx, ty), (b["x"] + b["w"] / 2, ty)]
                 add(pts, e, lx=Rx + 8, ly=(a["y"] + a["h"] / 2 + ty) / 2)
+            continue
+        if e["from"] in sset and col.get(e["to"]) == "L":
+            x1, x2 = a["x"] - a["w"] / 2, b["x"] + b["w"] / 2
+            pts = [(x1, a["y"]), (x2, a["y"])]
+            wl = wrap_label(e.get("label", []), 12)
+            add(pts, e, lx=(x1 + x2) / 2, ly=a["y"] - 8 - 13 * max(0, len(wl) - 1), anchor="middle")
+            continue
+        if col.get(e["from"]) == "L" and col.get(e["to"]) == "L":
+            pts = [(Lx, a["y"] + a["h"] / 2), (Lx, b["y"] - b["h"] / 2)]
+            add(pts, e, lx=Lx + 8, ly=(a["y"] + a["h"] / 2 + b["y"] - b["h"] / 2) / 2 + 4)
             continue
         if col.get(e["from"]) == "L":
             x1, x2 = a["x"] + a["w"] / 2, b["x"] - b["w"] / 2
@@ -645,6 +690,7 @@ html, body { height: 100%; background: #f7f7f7; font-family: __FONT__; color: #3
     <span class="zv" id="zv">100%</span>
     <span class="zb" onclick="setZoom(1)">&#65291;</span>
     <span class="zb" onclick="setZoom(0)">适宽</span>
+    <span class="zb" id="fsb" onclick="toggleFs()">全屏</span>
   </div>
   <div class="cv" id="cv"><div class="inner" id="inner">__SVG__</div></div>
 </div>
@@ -658,6 +704,13 @@ function setZoom(d) {
   if (svg) svg.style.width = zoom + '%';
   document.getElementById('zv').textContent = zoom + '%';
 }
+function toggleFs() {
+  if (document.fullscreenElement) { document.exitFullscreen(); }
+  else if (document.documentElement.requestFullscreen) { document.documentElement.requestFullscreen(); }
+}
+document.addEventListener('fullscreenchange', function () {
+  document.getElementById('fsb').textContent = document.fullscreenElement ? '退出全屏' : '全屏';
+});
 (function () {
   var cv = document.getElementById('cv');
   var drag = false, sx = 0, sy = 0, ox = 0, oy = 0;
@@ -689,6 +742,7 @@ def main():
     ap.add_argument("--start", default=None)
     ap.add_argument("--style", default=None, help="样式覆盖 JSON 文件")
     ap.add_argument("--spine", default=None, help="逗号分隔节点 id，强制指定主干顺序（覆盖自动主干选择）")
+    ap.add_argument("--left", default=None, help="逗号分隔节点 id，指定分支链放左列（经左侧远端通道汇入目标左端口）")
     args = ap.parse_args()
 
     spec = load_spec(args.input)
@@ -704,7 +758,8 @@ def main():
 
     style = json.loads(open(args.style, encoding="utf-8").read()) if args.style else None
     force = [s.strip() for s in args.spine.split(",") if s.strip()] if args.spine else None
-    lay = layout(spec, args.start, style, force)
+    fleft = [s.strip() for s in args.left.split(",") if s.strip()] if args.left else None
+    lay = layout(spec, args.start, style, force, fleft)
 
     report = {
         "nodes": len(spec["nodes"]), "edges": len(spec["edges"]),

@@ -87,6 +87,17 @@ def main():
     check("--spine 强制主干生效", ok and rep3.get("spine") == list("ABCEFGH"), str(rep3.get("spine")))
     check("主干跳级边零交叉", ok and rep3.get("crossings") == 0, str(rep3.get("crossings")))
 
+    # ── 左列分支链 --left ──
+    lft = os.path.join(tmp, "left.mmd")
+    with open(lft, "w", encoding="utf-8") as f:
+        f.write("flowchart TD\nA[开始] --> B{校验？}\nB -->|否| P[人工核对]\nP --> DD\n"
+                "B -->|是| CC[自动通过]\nCC --> DD[汇总]\nDD --> EE[完成]\n")
+    p = run([lft, "--check", "--left", "P"])
+    ok = p.returncode == 0
+    rep4 = json.loads(p.stdout) if ok else {}
+    check("--left 左列分支链生效", ok and rep4.get("spine") == ["A", "B", "CC", "DD", "EE"], str(rep4.get("spine")))
+    check("左列分支链零交叉", ok and rep4.get("crossings") == 0, str(rep4.get("crossings")))
+
     # ── 形态降级检查：不适用图应明确报错而非产出烂图 ──
     bad = os.path.join(tmp, "bad.mmd")
     with open(bad, "w", encoding="utf-8") as f:

@@ -26,7 +26,7 @@ Codex CLI（支持 Agent Skills 的版本）：
 ln -s "$(pwd)/flow-canvas" ~/.codex/skills/flow-canvas
 ```
 
-安装后自检（19 项断言，全 PASS 才算可用）：
+安装后自检（21 项断言，全 PASS 才算可用）：
 
 ```bash
 python3 flow-canvas/scripts/selftest.py
@@ -41,7 +41,7 @@ python3 scripts/flowlayout.py examples/member-onboarding.mmd --check   # 布局�
 
 ## 适用形态
 
-单主干 + 右侧分支链 + 直角回线 + 左侧旁路源 + 主干跳级边（业务审批 / 开通 / 申请流程的典型形状）。自动主干选择不符合业务主链路时可用 `--spine A,B,C` 强制指定。不适用的图形态会**明确报错**并建议 mermaid 原生渲染，不会产出带交叉的烂图。
+单主干 + 左右分支链 + 直角回线 + 左侧旁路源 + 主干跳级边（业务审批 / 开通 / 申请流程的典型形状）。自动主干选择不符合业务主链路时可用 `--spine A,B,C` 强制指定；分支链与右侧通道冲突时可用 `--left D1` 放到左列。HTML 画布带缩放 / 拖拽 / 全屏。不适用的图形态会**明确报错**并建议 mermaid 原生渲染，不会产出带交叉的烂图。
 
 ## 契约
 
