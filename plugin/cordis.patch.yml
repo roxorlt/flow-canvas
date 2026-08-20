@@ -1,0 +1,8 @@
+# dsh-diagram-viewer bundle patch
+#
+# 安装：dsh plugin --profile web add link:/Users/roxor/Desktop/work/flow-canvas/plugin
+# CLI 会安装包并把本 bundle 追加进 dsh.profile.bundles；启动时本 patch 把
+# diagram_render 工具行插进组合（与 genui / better-sidebar 同机制）。
+- insert:
+    - id: diagram-viewer
+      name: 'dsh-diagram-viewer'
