@@ -1,4 +1,4 @@
-// diagram-viewer Host 半部（cordis_define code.host 函数体，与 diagr-1/pkg-4 一致）。
+// diagram-viewer Host 半部（cordis_define code.host 函数体，与 diagr-1/pkg-5 一致（含引擎缓存再校验））。
 // 运行环境：DSH 动态插件。依赖 Builtin：ctx / harness / console。
 // 依赖 Service：subprocess（可选 sandboxPolicy 仅作兜底）。
 return {
@@ -52,7 +52,11 @@ return {
     }
 
     async function resolveEngine(exec) {
-      if (resolved !== null) return resolved
+      if (resolved !== null) {
+        const chk = await runChecked(['/bin/sh', '-c', 'test -f "$1" && grep -q -- "--type" "$1"', 'sh', resolved.engine], {})
+        if (chk.exitCode === 0) return resolved
+        resolved = null // 缓存失效（如 worktree 已删除），重新探测
+      }
       const tried = []
       // 1) pwd 探测：harness 进程 cwd 即会话工作区
       try {
