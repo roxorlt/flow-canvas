@@ -1,15 +1,23 @@
 # flow-canvas
 
-把业务流程（mermaid / 自然语言 / flowspec JSON）渲染成**横平竖直的正交规范流程图**的 Agent Skill：扁菱形判断、"是/否"端口约定、节点对齐、直角回线、零交叉。产出 SVG 或带缩放/拖拽的单文件 HTML 画布。
+把业务图（mermaid 子集 / 自然语言 / flowspec JSON）渲染成**横平竖直的规范 SVG** 的 Agent Skill：五类图共用一条质量纪律——`--check` 报告 `crossings / overlaps / textOverflow` 全 0 才合格，形态超限明确报错降级、不产烂图。
 
-排版由零依赖 Python 脚本确定性完成——跨 Claude Code / Codex、跨 Mac / Windows 效果一致，不依赖模型每次发挥。
+| 类型 | `--type` | 说明 |
+| --- | --- | --- |
+| 流程图 | `flowchart`（默认） | 扁菱形判断、"是/否"端口约定、直角回线、零交叉（正交规范） |
+| 架构图 | `arch` | subgraph 泳道分层：泳道横向、泳道内纵向、跨泳道独立通道 |
+| ER 图 | `er` | 实体表格块 + barycenter 重排，左右端口直连、零交叉 |
+| 甘特图 | `gantt` | nice ticks 时间轴、任务条、里程碑、section 分隔带 |
+| 时序图 | `seq` | 生命线 + 消息分层错位，零交叉零溢出 |
+
+排版由零依赖 Python 脚本确定性完成——跨 Claude Code / Codex、跨 Mac / Windows 效果一致，不依赖模型每次发挥。各类型契约见 `contract/*spec-v1.md`。
 
 ## 信任声明
 
 - **零第三方依赖**：仅 Python 3.8+ 标准库
 - **无网络请求**：任何阶段不访问网络
-- **文件写入范围**：仅调用方指定的输出路径
-- 脚本可审计（单文件 `scripts/flowlayout.py`）
+- **文件写入范围**：仅调用方指定的输出路径（DSH 插件默认落盘 `<工作区>/.diagrams/`）
+- 脚本可审计（共享件 `scripts/flowcommon.py` + 统一入口 `scripts/flowlayout.py` + 四类模块 `scripts/layout_*.py`）
 
 ## 安装
 
@@ -26,7 +34,7 @@ Codex CLI（支持 Agent Skills 的版本）：
 ln -s "$(pwd)/flow-canvas" ~/.codex/skills/flow-canvas
 ```
 
-安装后自检（21 项断言，全 PASS 才算可用）：
+安装后自检（流程图 21 项 + 四类新类型 golden/降级断言，全 PASS 才算可用）：
 
 ```bash
 python3 flow-canvas/scripts/selftest.py
@@ -36,20 +44,28 @@ python3 flow-canvas/scripts/selftest.py
 
 ```bash
 python3 scripts/flowlayout.py examples/member-onboarding.mmd -o out.html --html --title "会员开通流程"
-python3 scripts/flowlayout.py examples/member-onboarding.mmd --check   # 布局检查报告
+python3 scripts/flowlayout.py examples/arch-3tier.mmd  --type arch  -o out.svg
+python3 scripts/flowlayout.py examples/er-order.mmd    --type er    -o out.svg
+python3 scripts/flowlayout.py examples/gantt-release.mmd --type gantt -o out.svg
+python3 scripts/flowlayout.py examples/seq-login-auth.mmd --type seq -o out.svg
+python3 scripts/flowlayout.py examples/gantt-release.mmd --type gantt --check   # 布局检查报告
 ```
 
-## 适用形态
+## 适用形态与降级
 
-单主干 + 左右分支链 + 直角回线 + 左侧旁路源 + 主干跳级边（业务审批 / 开通 / 申请流程的典型形状）。自动主干选择不符合业务主链路时可用 `--spine A,B,C` 强制指定；分支链与右侧通道冲突时可用 `--left D1` 放到左列。HTML 画布带缩放 / 拖拽 / 全屏。不适用的图形态会**明确报错**并建议 mermaid 原生渲染，不会产出带交叉的烂图。
+每类有明确的适用形态（见 `SKILL.md` 与各契约文档）：例如流程图适用"单主干 + 左右分支链 + 直角回线"形态（可用 `--spine A,B,C` 强制主干、`--left D1` 分支链放左列）；时序图 v1 仅相邻列消息、不支持 note/alt/激活条。**不适用的形态引擎会明确报错**（「形态超限」），此时降级为 mermaid 原生渲染，不会产出带交叉/重叠/溢出的烂图。HTML 画布带缩放 / 拖拽 / 全屏。
 
 ## 契约
 
-中间格式与产物契约见 [contract/flowspec-v1.md](contract/flowspec-v1.md)。下游项目（如 [flow-walkthrough](https://github.com/roxorlt/flow-walkthrough)）只依赖契约：SVG 根 `data-flowspec="1"`、可交互节点 `data-node="{id}"`、内置 `#sel-ring` 选中框。
+中间格式与产物契约见 `contract/` 目录（flowspec/1、archspec/1、erspec/1、ganttspec/1、seqspec/1）。SVG 根元素带对应 `data-*spec="1"` 版本；flowchart 的可交互节点带 `data-node="{id}"` 与内置 `#sel-ring` 选中框（下游如 flow-walkthrough 只依赖契约，不依赖布局器实现）。
 
 ## 样式
 
-默认灰度线框、产物禁 emoji（脚本硬校验）。用 `--style style.json` 覆盖任意样式变量（见脚本 `DEFAULT_STYLE`）。
+默认灰度线框、产物禁 emoji（引擎硬校验）。用 `--style style.json` 覆盖任意样式变量（键见各模块 STYLE / 流程图 `DEFAULT_STYLE`）。
+
+## DSH 动态插件（diagram-viewer）
+
+DSH 环境内置动态插件 `diagram-viewer`：模型调用 `diagram_render` 工具（引擎子进程 + 落盘 `<工作区>/.diagrams/<slug>.svg` + 检查报告），对话流内工具卡片内联渲染 SVG（缩放/拖拽、跟随深浅主题）。设计见 `docs/plans/2026-08-20-diagram-viewer-plugin-design.md`。
 
 ## License
 

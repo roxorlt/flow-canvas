@@ -23,17 +23,22 @@
   python3 flowlayout.py input.mmd  --check          # 仅输出布局检查报告 JSON
   python3 flowlayout.py input.mmd  -o out.svg --style style.json   # 覆盖样式变量
   python3 flowlayout.py input.mmd  -o out.svg --spine A,B,C        # 强制主干顺序（覆盖自动选择）
+  python3 flowlayout.py input.mmd  -o out.svg --type arch          # 多图类型：flowchart|arch|er|gantt|seq
 """
 import sys
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
+import importlib
 import json
 import re
 import sys
 import argparse
-import unicodedata
+
+from flowcommon import (find_emoji, text_width, wrap_label, node_size, esc,
+                        ortho_crossings, box_overlaps, text_overflow_check,
+                        build_report, render_html)
 
 SPEC_VERSION = "flowspec/1"
 
@@ -60,25 +65,6 @@ DEFAULT_STYLE = {
     "sel_ring_stroke": "#4a90d9",
     "sel_ring_fill": "rgba(74,144,217,0.08)",
 }
-
-EMOJI_RANGES = [
-    (0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2B00, 0x2BFF),
-    (0xFE0F, 0xFE0F), (0x2705, 0x2705), (0x274C, 0x274C),
-    (0x2714, 0x2714), (0x2716, 0x2716),
-]
-
-
-def find_emoji(text):
-    return [ch for ch in text if any(a <= ord(ch) <= b for a, b in EMOJI_RANGES)]
-
-
-def text_width(s, fs):
-    """按字符宽度估算文本像素宽（全角 1.0、半角 0.55），留 8% buffer 兜字体差异。"""
-    w = 0.0
-    for ch in s:
-        w += fs * (1.0 if unicodedata.east_asian_width(ch) in ("F", "W") else 0.55)
-    return w * 1.08
-
 
 # ── 解析层 ──────────────────────────────────────────────────────────
 NODE_SHAPES = [
@@ -282,32 +268,6 @@ class Graph:
 
 
 # ── 布局层 ──────────────────────────────────────────────────────────
-def node_size(n, st):
-    fs = st["fs_node"]
-    lines = n["label"]
-    widths = [text_width(l, fs if i == 0 or n["type"] != "process" else st["fs_sub"])
-              for i, l in enumerate(lines)]
-    tw = max(widths) if widths else 40
-    nl = len(lines)
-    if n["type"] == "decision":
-        w = max(150, tw * 1.55 + 24)
-        h = max(64, nl * (fs + 6) + 44)
-    else:
-        w = max(120, tw + 30)
-        h = max(36, nl * (fs + 5) + 18)
-    return round(w / 2) * 2, round(h / 2) * 2
-
-
-def wrap_label(lines, limit=13):
-    out = []
-    for l in lines:
-        while len(l) > limit:
-            out.append(l[:limit])
-            l = l[limit:]
-        out.append(l)
-    return out
-
-
 def layout(spec, start=None, style=None, force_spine=None, force_left=None):
     st = dict(DEFAULT_STYLE)
     if style:
@@ -581,36 +541,26 @@ def layout(spec, start=None, style=None, force_spine=None, force_left=None):
         warnings.append("边 %s→%s 使用了通用回退路由" % (e["from"], e["to"]))
         add([(a["x"], a["y"] + a["h"] / 2), (a["x"], b["y"] - b["h"] / 2)], e)
 
-    # ── 交叉检测（正交线段） ──
-    segs = []
-    for ri, r in enumerate(routes):
-        p = r["pts"]
-        for i in range(len(p) - 1):
-            segs.append((p[i], p[i + 1], ri))
-    crossings = []
-    for i in range(len(segs)):
-        for j in range(i + 1, len(segs)):
-            (a1, a2, r1), (b1, b2, r2) = segs[i], segs[j]
-            if r1 == r2:
-                continue
-            ah = abs(a1[1] - a2[1]) < 0.01
-            bh = abs(b1[1] - b2[1]) < 0.01
-            if ah == bh:
-                continue
-            hseg, vseg = ((a1, a2), (b1, b2)) if ah else ((b1, b2), (a1, a2))
-            hy = hseg[0][1]
-            hx1, hx2 = sorted((hseg[0][0], hseg[1][0]))
-            vx = vseg[0][0]
-            vy1, vy2 = sorted((vseg[0][1], vseg[1][1]))
-            if hx1 < vx < hx2 and vy1 < hy < vy2:
-                endpoints = [hseg[0], hseg[1], vseg[0], vseg[1]]
-                if any(abs(px - vx) < 0.01 and abs(py - hy) < 0.01 for px, py in endpoints):
-                    continue
-                crossings.append({"at": [round(vx), round(hy)]})
+    # ── 质检：交叉 / 重叠 / 文字溢出（共享件） ──
+    crossings = ortho_crossings(routes)
+    boxes = [(nid, n["x"], n["y"], n["w"], n["h"]) for nid, n in N.items()]
+    overlaps = box_overlaps(boxes)
+
+    def metrics(n, j):
+        fs = st["fs_node"] if (j == 0 or n["type"] == "decision") else st["fs_sub"]
+        if n["type"] == "decision":
+            d = abs(j - (len(n["label"]) - 1) / 2) * (fs + 4)
+            avail = n["w"] * (1 - 2 * d / n["h"]) - 8
+        else:
+            avail = n["w"] - 10
+        return fs, avail
+
+    text_overflow = text_overflow_check(N, g.order, metrics)
 
     return {"nodes": N, "order": g.order, "routes": routes, "spine": spine,
             "W": round(W), "H": round(H), "style": st,
-            "crossings": crossings, "warnings": warnings, "col": col}
+            "crossings": crossings, "overlaps": overlaps,
+            "textOverflow": text_overflow, "warnings": warnings, "col": col}
 
 
 # ── 渲染层 ──────────────────────────────────────────────────────────
@@ -664,92 +614,30 @@ def render_svg(lay, title=""):
     return "\n".join(out)
 
 
-def esc(s):
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-HTML_SHELL = """<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>__TITLE__</title>
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; background: #f7f7f7; font-family: __FONT__; color: #333; }
-.wrap { display: flex; flex-direction: column; height: 100vh; padding: 16px; gap: 10px; }
-.bar { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #888; }
-.bar .t { font-size: 15px; font-weight: 700; color: #333; margin-right: auto; }
-.zb { padding: 2px 10px; border: 1px solid #c0c0c0; border-radius: 4px; cursor: pointer; background: #fff; user-select: none; color: #333; }
-.zv { min-width: 40px; text-align: center; }
-.cv { flex: 1; min-height: 0; overflow: hidden; border: 1px solid #e0e0e0; border-radius: 6px; background: #fff; cursor: grab; touch-action: none; user-select: none; }
-.cv:active { cursor: grabbing; }
-.inner { transform-origin: 0 0; will-change: transform; }
-.inner svg { width: 100%; height: auto; display: block; }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="bar">
-    <span class="t">__TITLE__</span>
-    <span class="zb" onclick="setZoom(-1)">&#65293;</span>
-    <span class="zv" id="zv">100%</span>
-    <span class="zb" onclick="setZoom(1)">&#65291;</span>
-    <span class="zb" onclick="setZoom(0)">适宽</span>
-    <span class="zb" id="fsb" onclick="toggleFs()">全屏</span>
-  </div>
-  <div class="cv" id="cv"><div class="inner" id="inner">__SVG__</div></div>
-</div>
-<script>
-var zoom = 100, px = 0, py = 0;
-function apply() { document.getElementById('inner').style.transform = 'translate(' + px + 'px,' + py + 'px)'; }
-function setZoom(d) {
-  zoom = (d === 0) ? 100 : Math.min(300, Math.max(100, zoom + d * 40));
-  if (d === 0) { px = 0; py = 0; apply(); }
-  var svg = document.querySelector('#inner svg');
-  if (svg) svg.style.width = zoom + '%';
-  document.getElementById('zv').textContent = zoom + '%';
-}
-function toggleFs() {
-  if (document.fullscreenElement) { document.exitFullscreen(); }
-  else if (document.documentElement.requestFullscreen) { document.documentElement.requestFullscreen(); }
-}
-document.addEventListener('fullscreenchange', function () {
-  document.getElementById('fsb').textContent = document.fullscreenElement ? '退出全屏' : '全屏';
-});
-(function () {
-  var cv = document.getElementById('cv');
-  var drag = false, sx = 0, sy = 0, ox = 0, oy = 0;
-  cv.addEventListener('pointerdown', function (e) { drag = true; sx = e.clientX; sy = e.clientY; ox = px; oy = py; });
-  window.addEventListener('pointermove', function (e) { if (!drag) return; px = ox + e.clientX - sx; py = oy + e.clientY - sy; apply(); });
-  window.addEventListener('pointerup', function () { drag = false; });
-})();
-</script>
-</body>
-</html>
-"""
-
-
-def render_html(lay, title):
-    svg = render_svg(lay, title)
-    return (HTML_SHELL.replace("__TITLE__", esc(title or "流程图"))
-            .replace("__FONT__", lay["style"]["font_family"])
-            .replace("__SVG__", svg))
-
-
 # ── 入口 ────────────────────────────────────────────────────────────
 def main():
-    ap = argparse.ArgumentParser(description="flow-canvas 正交流程图布局器")
+    ap = argparse.ArgumentParser(description="flow-canvas 多图类型排版引擎（flowchart 为正交流程图布局器）")
     ap.add_argument("input")
     ap.add_argument("-o", "--output")
     ap.add_argument("--html", action="store_true")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--title", default="")
+    ap.add_argument("--type", default="flowchart", choices=["flowchart", "arch", "er", "gantt", "seq"],
+                    help="图类型：flowchart|arch|er|gantt|seq（默认 flowchart）")
     ap.add_argument("--start", default=None)
     ap.add_argument("--style", default=None, help="样式覆盖 JSON 文件")
     ap.add_argument("--spine", default=None, help="逗号分隔节点 id，强制指定主干顺序（覆盖自动主干选择）")
     ap.add_argument("--left", default=None, help="逗号分隔节点 id，指定分支链放左列（经左侧远端通道汇入目标左端口）")
     args = ap.parse_args()
+
+    if args.type != "flowchart":
+        mod_name = {"arch": "layout_arch", "er": "layout_er",
+                    "gantt": "layout_gantt", "seq": "layout_seq"}[args.type]
+        try:
+            mod = importlib.import_module(mod_name)
+        except ImportError as exc:
+            raise SystemExit("错误：布局模块 %s 不可用：%s" % (mod_name, exc))
+        raise SystemExit(mod.main_cli(args))
 
     spec = load_spec(args.input)
     bad = []
@@ -767,14 +655,8 @@ def main():
     fleft = [s.strip() for s in args.left.split(",") if s.strip()] if args.left else None
     lay = layout(spec, args.start, style, force, fleft)
 
-    report = {
-        "nodes": len(spec["nodes"]), "edges": len(spec["edges"]),
-        "spine": lay["spine"], "crossings": len(lay["crossings"]),
-        "crossing_points": lay["crossings"], "warnings": lay["warnings"],
-        "canvas": [lay["W"], lay["H"]],
-    }
-    if lay["crossings"]:
-        report["warnings"].append("检测到 %d 处线段交叉" % len(lay["crossings"]))
+    report = build_report(len(spec["nodes"]), len(spec["edges"]), lay)
+    report["spine"] = lay["spine"]
     if len(lay["crossings"]) > 3:
         report["warnings"].append("交叉过多：该图不适合正交模式，建议使用 mermaid 原生渲染")
 
@@ -783,7 +665,8 @@ def main():
         return
     if not args.output:
         raise SystemExit("错误：需要 -o 指定输出文件（或使用 --check）")
-    content = render_html(lay, args.title) if args.html else render_svg(lay, args.title)
+    content = render_html(render_svg(lay, args.title), args.title,
+                          lay["style"]["font_family"]) if args.html else render_svg(lay, args.title)
     with open(args.output, "w", encoding="utf-8", newline="\n") as f:
         f.write(content)
     print(json.dumps(report, ensure_ascii=False))

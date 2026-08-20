@@ -106,6 +106,15 @@ def main():
     check("复杂图明确降级（报错而非烂图）", p.returncode != 0 and "适用形态" in (p.stderr or ""),
           (p.stderr or p.stdout).strip()[:80])
 
+    # ── L4 多图类型（arch/er/gantt/seq，各自独立自检模块集成） ──
+    import importlib
+    for mod_name in ("selftest_arch", "selftest_er", "selftest_gantt", "selftest_seq"):
+        try:
+            m = importlib.import_module(mod_name)
+            m.section(check, tmp, run)
+        except Exception as e:
+            check("%s 自检模块加载" % mod_name, False, str(e))
+
     fails = [r for r in results if not r[1]]
     print("\n%d/%d 通过" % (len(results) - len(fails), len(results)))
     if fails:
