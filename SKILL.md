@@ -13,7 +13,7 @@ description: 把业务图渲染成横平竖直的规范 SVG：流程图（正交
 | --- | --- | --- | --- |
 | 流程图 | `flowchart`（默认） | flowchart TD：`A["文本"]` `A{"判断"}` `A[["后台"]]`、`-->|label|`、`class X external/backend`、`<br>` 换行 | 单主干 + 左右分支链 + 直角回线 + 跳级边（契约 flowspec/1） |
 | 架构图 | `arch` | flowchart + `subgraph 标题 … end` 泳道 | 泳道横向、泳道内纵向；跨泳道边走泳道间共享垂直总线、端口错位 |
-| ER 图 | `er` | erDiagram 实体 `{ 类型 属性 PK/FK }`、`A \|\|--o{ B : "标签"` | 实体表格块 + barycenter 重排，左右端口直连 |
+| ER 图 | `er` | erDiagram 实体 `{ 类型 属性 PK/FK }`、`A \|\|--o{ B : "标签"` | 实体表格块 + barycenter 重排，左右端口直连；关系标签 ≤4 个汉字 |
 | 甘特图 | `gantt` | gantt：`dateFormat YYYY-MM-DD`/`HH:mm`、`section`、任务 `:id, 开始, Nd`、`after id`、`:milestone` | 时间轴 nice ticks（1/2/5×10^k）、统一行高、条内/条外标签 |
 | 时序图 | `seq` | sequenceDiagram：`participant A as 名`、`A->>B: 消息`、`A-->>B: 返回`、`A->>A: 自消息` | 生命线 + 消息分层错位防重叠 |
 
