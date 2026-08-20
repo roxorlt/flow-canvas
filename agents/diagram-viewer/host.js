@@ -1,4 +1,4 @@
-// diagram-viewer Host 半部（cordis_define code.host 函数体，与 diagr-1/pkg-5 一致（含引擎缓存再校验））。
+// diagram-viewer Host 半部（cordis_define code.host 函数体，与 diagr-1/pkg-6 一致）。
 // 运行环境：DSH 动态插件。依赖 Builtin：ctx / harness / console。
 // 依赖 Service：subprocess（可选 sandboxPolicy 仅作兜底）。
 return {
@@ -111,7 +111,7 @@ return {
     harness.handle('load-diagram', async (args) => {
       const slug = String(args.slug || '').replace(/[^A-Za-z0-9_\u4e00-\u9fff-]/g, '').slice(0, 60)
       if (!slug) throw new Error('bad slug')
-      if (resolved === null) throw new Error('插件尚未解析引擎路径')
+      if (resolved === null) await resolveEngine(undefined)
       const r = await runChecked(['/bin/cat', slug + '.svg'], {}, resolved.outDir)
       if (r.exitCode !== 0) throw new Error('读取产物失败：' + (r.err || ('退出码 ' + r.exitCode)))
       return { svg: r.out }
