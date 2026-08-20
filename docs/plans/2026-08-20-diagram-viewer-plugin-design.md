@@ -77,11 +77,21 @@ render() 只把摘要 JSON 发给模型：`{ slug, type, svgPath, report }`；
 client 卡片按 slug 经 `host.call('load-diagram', {slug})` 取落盘 SVG 内联渲染，
 模型上下文不背 SVG 正文。
 
-## 引擎路径解析
+## 引擎路径解析（实测修正）
 
-候选（存在且源码含 `--type` 才采用）：
-1. `<workspace>/.worktrees/feat-multi-type-layout/scripts/flowlayout.py`（开发期）
-2. `<workspace>/scripts/flowlayout.py`（合并后）
+`sandboxPolicy.workspaceRoot` 返回部署级根目录（本机实测为 `/Users/roxor`，非会话
+工作区）；`fs` Service 在动态插件上下文读取工作区文件不可靠。最终实现（pkg-4）：
+
+1. `/bin/pwd` 探测 harness 进程 cwd（= 会话工作区），依次试
+   `<ws>/.worktrees/feat-multi-type-layout/scripts/flowlayout.py` 与
+   `<ws>/scripts/flowlayout.py`；
+2. `exec.agent` 的 cwd 线索（agent.cwd / header.cwd / session.header.cwd）；
+3. `sandboxPolicy.workspaceRoot` 及变体兜底。
+候选必须通过 `test -f && grep -q --type` 校验才被采用。
+
+文件 I/O 全部走 subprocess（`/bin/mkdir`、`/bin/sh -c 'cat > "$1"'`（stdin 写输入）、
+`/bin/cat`（load-diagram 读 SVG））；引擎脚本需可执行位（仓库 100755）。
+产物相对工作区落盘 `<工作区>/.diagrams/<slug>.{mmd,svg,html,style.json}`。
 
 ## 产物落盘
 

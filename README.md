@@ -47,7 +47,7 @@ python3 scripts/flowlayout.py examples/member-onboarding.mmd -o out.html --html 
 python3 scripts/flowlayout.py examples/arch-3tier.mmd  --type arch  -o out.svg
 python3 scripts/flowlayout.py examples/er-order.mmd    --type er    -o out.svg
 python3 scripts/flowlayout.py examples/gantt-release.mmd --type gantt -o out.svg
-python3 scripts/flowlayout.py examples/seq-login.mmd   --type seq   -o out.svg
+python3 scripts/flowlayout.py examples/seq-login-auth.mmd --type seq -o out.svg
 python3 scripts/flowlayout.py examples/gantt-release.mmd --type gantt --check   # 布局检查报告
 ```
 
