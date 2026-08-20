@@ -1,17 +1,20 @@
 display_name: Flow Canvas
-display_text: 把业务流程渲染成横平竖直的正交规范流程图（SVG / 可缩放拖拽 HTML 画布）
-default_prompt: 用 flow-canvas 把这份流程画成规范流程图
+display_text: 把业务图渲染成横平竖直的规范 SVG：流程图（正交规范）、架构图、ER 图、甘特图、时序图
+default_prompt: 用 flow-canvas 把这份内容画成规范图
 activation:
   mode: model-invoked
   triggers:
-    - 画个流程图 / 业务流程图
-    - 审批流、开通流程、申请流程画图
-    - 把 mermaid 转成规范流程图 / 流程图横平竖直
+    - 画个流程图 / 业务流程图 / 审批流、开通流程、申请流程画图
+    - 画架构图 / 泳道图 / 分层架构
+    - 画 ER 图 / 实体关系图
+    - 画甘特图 / 项目计划 / 排期
+    - 画时序图 / 交互流程
+    - 把 mermaid 转成规范图 / 流程图横平竖直
     - 评审用的流程图
-    - render orthogonal flowchart
+    - render flowchart / architecture / ER / gantt / sequence diagram
   anti_triggers:
     - 只要 mermaid 源码文本
-    - 时序图 / 甘特图 / 架构图 / 脑图
+    - 脑图 / 表格
 execution_context:
   runtime: python3 >= 3.8（仅标准库，零第三方依赖）
   entry: scripts/flowlayout.py
@@ -23,6 +26,6 @@ trust:
   telemetry: none
 adapter_targets: [claude, openai, generic]
 degradation:
-  - no_python3: 按 contract/flowspec-v1.md 布局规则手工生成 SVG（无自动交叉检测，质量降级并告知用户）
-  - shape_mismatch: 布局器对不适用形态明确报错，降级为 mermaid 原生渲染
-  - crossings_gt_3: 建议 mermaid 原生渲染，不交付带交叉产物
+  - no_python3: 按对应 contract/*spec-v1.md 布局规则手工生成 SVG（无自动交叉/重叠检测，质量降级并告知用户）
+  - shape_mismatch: 引擎对不适用形态明确报「形态超限」错误，降级为 mermaid 原生渲染
+  - check_not_clean: --check 报告 crossings/overlaps/textOverflow 非 0 即拒绝产出，降级为 mermaid 原生渲染

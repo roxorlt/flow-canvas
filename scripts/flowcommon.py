@@ -406,6 +406,6 @@ def common_main(args, mod):
     content = mod.render_html(lay, args.title) if args.html else mod.render_svg(lay, args.title)
     with open(args.output, "w", encoding="utf-8", newline="\n") as f:
         f.write(content)
-    print(json.dumps(report, ensure_ascii=False, indent=1))
+    print(json.dumps(report, ensure_ascii=False))
     print("已生成 %s" % args.output)
     return 0
