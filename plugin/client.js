@@ -24,7 +24,10 @@ window.__ModuleLoader__.load({
       '.dv-canvas:active{cursor:grabbing;}',
       '.dv-stage{transform-origin:0 0;will-change:transform;}',
       '.dv-svg svg{display:block;height:auto;max-width:none;}',
-      '@media (prefers-color-scheme: dark){.dv-canvas{background:#171717;}.dv-svg svg{filter:invert(0.92) hue-rotate(180deg);}}',
+      '.dv-view:fullscreen{display:flex;flex-direction:column;width:100vw;height:100vh;background:var(--dsw-alias-bg-base,#fff);border:none;border-radius:0;}',
+      '.dv-view:fullscreen .dv-bar{flex:none;}',
+      '.dv-view:fullscreen .dv-canvas{flex:1;height:auto;max-height:none;background:#fbfbfb;}',
+      '@media (prefers-color-scheme: dark){.dv-canvas{background:#171717;}.dv-svg svg{filter:invert(0.92) hue-rotate(180deg);}.dv-view:fullscreen .dv-canvas{background:#171717;}}',
     ].join('\n')
 
     function ensureCss() {
@@ -41,6 +44,8 @@ window.__ModuleLoader__.load({
       const [pan, setPan] = React.useState({ x: 0, y: 0 })
       const [fit, setFit] = React.useState(false)
       const [copied, setCopied] = React.useState(false)
+      const [fullscreen, setFullscreen] = React.useState(false)
+      const wrapRef = React.useRef(null)
       const canvasRef = React.useRef(null)
       const dragRef = React.useRef(null)
 
@@ -57,6 +62,18 @@ window.__ModuleLoader__.load({
         return () => el.removeEventListener('wheel', onWheel)
       }, [])
 
+      // 全屏切换：进入/退出都重置适屏状态，按新视口重新「完整包含」
+      React.useEffect(() => {
+        const onChange = () => {
+          const active = document.fullscreenElement === wrapRef.current
+          setFullscreen(active)
+          setPan({ x: 0, y: 0 })
+          setFit(false)
+        }
+        document.addEventListener('fullscreenchange', onChange)
+        return () => document.removeEventListener('fullscreenchange', onChange)
+      }, [])
+
       React.useEffect(() => {
         const el = canvasRef.current
         if (!el || fit) return
@@ -65,7 +82,7 @@ window.__ModuleLoader__.load({
         const w = parseFloat(m[1])
         const h = parseFloat(m[2])
         if (!(w > 0 && h > 0)) return
-        // 初始「完整包含」：宽高都适配，整图可见（避免高图被裁切）
+        // 初始「完整包含」：宽高都适配，整图可见，且不超过 100% 放大
         const zf = el.clientWidth > 0 ? (el.clientWidth - 24) / w : 1
         const zh = el.clientHeight > 0 ? (el.clientHeight - 24) / h : 1
         setZoom(Math.min(1, zf, zh))
@@ -81,6 +98,15 @@ window.__ModuleLoader__.load({
       const onPointerUp = () => { dragRef.current = null }
       const reset = () => { setZoom(1); setPan({ x: 0, y: 0 }) }
       const zoomBy = (f) => setZoom((z) => Math.min(4, Math.max(0.2, z * f)))
+      const toggleFullscreen = () => {
+        const el = wrapRef.current
+        if (!el) return
+        if (document.fullscreenElement) {
+          document.exitFullscreen()
+        } else if (el.requestFullscreen) {
+          el.requestFullscreen().catch(() => {})
+        }
+      }
       const copyMermaid = () => {
         const text = props.mermaid
         if (!text) return
@@ -103,7 +129,7 @@ window.__ModuleLoader__.load({
         }
       }
 
-      return React.createElement('div', { className: 'dv-view', 'data-tool': 'diagram_render' },
+      return React.createElement('div', { className: 'dv-view', 'data-tool': 'diagram_render', ref: wrapRef },
         React.createElement('div', { className: 'dv-bar' },
           React.createElement('span', { className: 'dv-title' }, 'diagram_render'),
           React.createElement('button', { className: 'dv-btn', onClick: () => zoomBy(0.8) }, '−'),
@@ -111,7 +137,7 @@ window.__ModuleLoader__.load({
           React.createElement('button', { className: 'dv-btn', onClick: () => zoomBy(1.25) }, '+'),
           React.createElement('button', { className: 'dv-btn', onClick: reset }, '重置'),
           props.mermaid ? React.createElement('button', { className: 'dv-btn', onClick: copyMermaid }, copied ? '已复制' : '复制 mermaid') : null,
-          props.openFile ? React.createElement('button', { className: 'dv-btn', onClick: () => props.openFile(props.svgPath) }, '打开文件') : null,
+          typeof document !== 'undefined' && document.fullscreenEnabled ? React.createElement('button', { className: 'dv-btn', onClick: toggleFullscreen }, fullscreen ? '退出全屏' : '全屏') : null,
         ),
         React.createElement('div', {
           className: 'dv-canvas', ref: canvasRef,
@@ -144,7 +170,7 @@ window.__ModuleLoader__.load({
           React.createElement('span', { className: 'dv-hint' }, (meta && meta.error) || '渲染失败'),
         )
       }
-      return React.createElement(Viewer, { svg: meta.svg, svgPath: meta.svgPath, mermaid: meta.mermaid, openFile: props.openFile })
+      return React.createElement(Viewer, { svg: meta.svg, svgPath: meta.svgPath, mermaid: meta.mermaid })
     }
 
     function apply(ctx) {
