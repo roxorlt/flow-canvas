@@ -24,11 +24,30 @@ CLI 会安装包（link 符号链接指向本目录）并把 `dsh-diagram-viewer
 
 按序取第一个存在且源码含 `--type` 的候选：
 
-1. 环境变量 `DIAGRAM_ENGINE_PATH`
+1. 环境变量 `DIAGRAM_ENGINE_PATH`（可配 `DIAGRAM_WORKSPACE`）
 2. 包内 `../scripts/flowlayout.py`（link 安装时即本仓库 scripts/）
 3. `~/Desktop/work/flow-canvas/scripts/flowlayout.py`
 
-工作区取 `process.cwd()`（harness 会话工作区），产物落盘其下 `.diagrams/`。
+产物工作区 = 引擎所在仓库根（`<repo>/.diagrams/`），与 dsh 从哪个目录启动无关。
+
+## ⚠️ 修改 host.js 后的强制流程（防把 dsh 挂掉）
+
+`ctx.tools.register` 是底层入口：`parameters` 与 `output.schema` 必须是**标准
+JSON Schema**（type ∈ object/array/string/number/integer/boolean/null；required
+是数组；任意 JSON 用「不带 type 的注解节点」表示）。作者 DSL（`type:'json'`、
+`required:true` 内联）只有 `defineTool()` 编译器认——写错会让整个 dsh 启动失败。
+
+改完任何插件文件，**先跑验证门再重启**：
+
+```sh
+cd ~/.dsh/profiles/web
+node /Users/roxor/Desktop/work/flow-canvas/plugin/validate.mjs   # 全部通过才继续
+dsh web --port 3187 --no-open    # 备用端口无头冒烟：看到 URL 输出、无报错 → Ctrl+C
+dsh web                          # 确认无误后才重启正式实例
+```
+
+host.js 里注册已包了 try/catch：注册失败只降级本插件（工具缺席 + 启动日志
+打「dsh-diagram-viewer」错误行），不会再拖垮 dsh 启动本身。
 
 ## 卸载
 
