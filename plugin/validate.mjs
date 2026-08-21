@@ -91,6 +91,8 @@ function main() {
       if (r.report.crossings !== 0 || r.report.overlaps !== 0 || r.report.textOverflow !== 0) fail('质检非全 0')
       if (typeof r.svg !== 'string' || !r.svg.includes('<svg')) fail('SVG 缺失')
       if (typeof r.svgPath !== 'string' || !r.svgPath.endsWith('.svg')) fail('svgPath 异常：' + r.svgPath)
+      const meta = diagramTool.output.presentationMeta({ mermaid: 'flowchart TD\nA --> B', type: 'seq' }, r)
+      if (typeof meta.mermaid !== 'string' || meta.mermaid.includes('flowchart') === false) fail('presentationMeta 缺 mermaid（卡片无法提供「复制 mermaid」）')
     }
     if (failures > 0) {
       console.error(`\n${failures} 项失败 —— 禁止重启 dsh，先修复 plugin/host.js`)

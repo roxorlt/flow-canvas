@@ -40,6 +40,7 @@ window.__ModuleLoader__.load({
       const [zoom, setZoom] = React.useState(1)
       const [pan, setPan] = React.useState({ x: 0, y: 0 })
       const [fit, setFit] = React.useState(false)
+      const [copied, setCopied] = React.useState(false)
       const canvasRef = React.useRef(null)
       const dragRef = React.useRef(null)
 
@@ -47,6 +48,8 @@ window.__ModuleLoader__.load({
         const el = canvasRef.current
         if (!el) return
         const onWheel = (e) => {
+          // 触控板双指滚动（无 ctrlKey）交还给页面滚动；只有 pinch / ctrl+滚轮才缩放
+          if (!e.ctrlKey) return
           e.preventDefault()
           setZoom((z) => Math.min(4, Math.max(0.2, z * (e.deltaY < 0 ? 1.12 : 0.89))))
         }
@@ -60,7 +63,13 @@ window.__ModuleLoader__.load({
         const m = /viewBox="0 0 ([\d.]+) ([\d.]+)"/.exec(props.svg || '')
         if (!m) return
         const w = parseFloat(m[1])
-        if (w > 0 && el.clientWidth > 0) { setZoom(Math.min(1, (el.clientWidth - 24) / w)); setFit(true) }
+        const h = parseFloat(m[2])
+        if (!(w > 0 && h > 0)) return
+        // 初始「完整包含」：宽高都适配，整图可见（避免高图被裁切）
+        const zf = el.clientWidth > 0 ? (el.clientWidth - 24) / w : 1
+        const zh = el.clientHeight > 0 ? (el.clientHeight - 24) / h : 1
+        setZoom(Math.min(1, zf, zh))
+        setFit(true)
       }, [props.svg, fit])
 
       const onPointerDown = (e) => { dragRef.current = { sx: e.clientX, sy: e.clientY, ox: pan.x, oy: pan.y } }
@@ -72,6 +81,27 @@ window.__ModuleLoader__.load({
       const onPointerUp = () => { dragRef.current = null }
       const reset = () => { setZoom(1); setPan({ x: 0, y: 0 }) }
       const zoomBy = (f) => setZoom((z) => Math.min(4, Math.max(0.2, z * f)))
+      const copyMermaid = () => {
+        const text = props.mermaid
+        if (!text) return
+        const done = () => { setCopied(true); setTimeout(() => setCopied(false), 1500) }
+        const fallback = () => {
+          try {
+            const ta = document.createElement('textarea')
+            ta.value = text
+            document.body.appendChild(ta)
+            ta.select()
+            document.execCommand('copy')
+            document.body.removeChild(ta)
+            done()
+          } catch { /* 忽略复制失败 */ }
+        }
+        if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done).catch(fallback)
+        } else {
+          fallback()
+        }
+      }
 
       return React.createElement('div', { className: 'dv-view', 'data-tool': 'diagram_render' },
         React.createElement('div', { className: 'dv-bar' },
@@ -80,6 +110,7 @@ window.__ModuleLoader__.load({
           React.createElement('span', { className: 'dv-zoom' }, Math.round(zoom * 100) + '%'),
           React.createElement('button', { className: 'dv-btn', onClick: () => zoomBy(1.25) }, '+'),
           React.createElement('button', { className: 'dv-btn', onClick: reset }, '重置'),
+          props.mermaid ? React.createElement('button', { className: 'dv-btn', onClick: copyMermaid }, copied ? '已复制' : '复制 mermaid') : null,
           props.openFile ? React.createElement('button', { className: 'dv-btn', onClick: () => props.openFile(props.svgPath) }, '打开文件') : null,
         ),
         React.createElement('div', {
@@ -113,7 +144,7 @@ window.__ModuleLoader__.load({
           React.createElement('span', { className: 'dv-hint' }, (meta && meta.error) || '渲染失败'),
         )
       }
-      return React.createElement(Viewer, { svg: meta.svg, svgPath: meta.svgPath, openFile: props.openFile })
+      return React.createElement(Viewer, { svg: meta.svg, svgPath: meta.svgPath, mermaid: meta.mermaid, openFile: props.openFile })
     }
 
     function apply(ctx) {

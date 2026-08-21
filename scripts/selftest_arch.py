@@ -58,6 +58,17 @@ def section(check, tmp, run):
     p = run([os.path.join(ROOT, "examples", "arch-3tier.mmd"), "--type", "arch", "-o", html, "--html"])
     check("arch HTML 画布模式生成", p.returncode == 0 and "setZoom" in open(html, encoding="utf-8").read() and "pointerdown" in open(html, encoding="utf-8").read())
 
+    # ── 跳级边能力：泳道内非相邻 + 跨多泳道（顶部走廊路由，全 0） ──
+    skip_src = os.path.join(ROOT, "examples", "arch-skip.mmd")
+    skip_svg = os.path.join(tmp, "arch-skip.svg")
+    p = run([skip_src, "--type", "arch", "-o", skip_svg])
+    check("arch 跳级边样例布局器运行", p.returncode == 0, p.stderr.strip()[:120])
+    if p.returncode == 0:
+        rep = json.loads(p.stdout.splitlines()[0])
+        check("arch 跳级边样例零交叉", rep.get("crossings") == 0, str(rep.get("crossings")))
+        check("arch 跳级边样例零重叠", rep.get("overlaps") == 0, str(rep.get("overlaps")))
+        check("arch 跳级边样例零文字溢出", rep.get("textOverflow") == 0, str(rep.get("textOverflow")))
+
     # ── 形态超限降级 ──
     bad1 = os.path.join(tmp, "arch-bad-decision.mmd")
     with open(bad1, "w", encoding="utf-8") as f:
@@ -65,17 +76,12 @@ def section(check, tmp, run):
     p = run([bad1, "--type", "arch", "--check"])
     check("arch 降级：decision 菱形明确报错", p.returncode != 0 and "形态超限" in (p.stderr or ""), (p.stderr or "").strip()[:80])
 
-    bad2 = os.path.join(tmp, "arch-bad-same-lane.mmd")
+    bad2 = os.path.join(tmp, "arch-bad-lanes.mmd")
     with open(bad2, "w", encoding="utf-8") as f:
-        f.write("flowchart TD\nsubgraph A\n  P1[\"甲\"]\n  P2[\"乙\"]\n  P3[\"丙\"]\nend\nP1 --> P3\n")
+        f.write("flowchart TD\n" + "\n".join(
+            "subgraph L%d\n  N%d[\"节点%d\"]\nend" % (i, i, i) for i in range(7)))
     p = run([bad2, "--type", "arch", "--check"])
-    check("arch 降级：泳道内非相邻边明确报错", p.returncode != 0 and "形态超限" in (p.stderr or ""), (p.stderr or "").strip()[:80])
-
-    bad3 = os.path.join(tmp, "arch-bad-skip.mmd")
-    with open(bad3, "w", encoding="utf-8") as f:
-        f.write("flowchart TD\nsubgraph A\n  P1[\"甲\"]\nend\nsubgraph B\n  P2[\"乙\"]\nend\nsubgraph C\n  P3[\"丙\"]\nend\nP1 --> P3\n")
-    p = run([bad3, "--type", "arch", "--check"])
-    check("arch 降级：跨多泳道边明确报错", p.returncode != 0 and "形态超限" in (p.stderr or ""), (p.stderr or "").strip()[:80])
+    check("arch 降级：泳道数超限明确报错", p.returncode != 0 and "形态超限" in (p.stderr or ""), (p.stderr or "").strip()[:80])
 
     # ── emoji 拒绝 ──
     bad4 = os.path.join(tmp, "arch-emoji.mmd")

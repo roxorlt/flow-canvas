@@ -103,8 +103,9 @@ const TOOL = {
       }
       return [{ type: 'text', text: JSON.stringify({ slug: value.slug, type: args.type, svgPath: value.svgPath, report: value.report }) }]
     },
-    presentationMeta(_args, value) {
-      return { slug: value.slug, svgPath: value.svgPath, report: value.report, svg: value.svg, error: value.error }
+    presentationMeta(args, value) {
+      return { slug: value.slug, svgPath: value.svgPath, report: value.report, svg: value.svg,
+               error: value.error, mermaid: args.mermaid, type: args.type }
     },
   },
   timeoutMs: 60000,

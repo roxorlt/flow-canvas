@@ -12,7 +12,7 @@ description: 把业务图渲染成横平竖直的规范 SVG：流程图（正交
 | 类型 | `--type` | mermaid 子集 | 布局要点 |
 | --- | --- | --- | --- |
 | 流程图 | `flowchart`（默认） | flowchart TD：`A["文本"]` `A{"判断"}` `A[["后台"]]`、`-->|label|`、`class X external/backend`、`<br>` 换行 | 单主干 + 左右分支链 + 直角回线 + 跳级边（契约 flowspec/1） |
-| 架构图 | `arch` | flowchart + `subgraph 标题 … end` 泳道 | 泳道横向、泳道内纵向；跨泳道边走泳道间共享垂直总线、端口错位 |
+| 架构图 | `arch` | flowchart + `subgraph 标题 … end` 泳道 | 泳道横向、泳道内纵向；跨泳道边走共享垂直总线、跳级边走顶部走廊、端口错位 |
 | ER 图 | `er` | erDiagram 实体 `{ 类型 属性 PK/FK }`、`A \|\|--o{ B : "标签"` | 实体表格块 + barycenter 重排，左右端口直连；关系标签 ≤4 个汉字 |
 | 甘特图 | `gantt` | gantt：`dateFormat YYYY-MM-DD`/`HH:mm`、`section`、任务 `:id, 开始, Nd`、`after id`、`:milestone` | 时间轴 nice ticks（1/2/5×10^k）、统一行高、条内/条外标签 |
 | 时序图 | `seq` | sequenceDiagram：`participant A as 名`、`A->>B: 消息`、`A-->>B: 返回`、`A->>A: 自消息` | 生命线 + 消息分层错位防重叠 |
@@ -41,7 +41,7 @@ description: 把业务图渲染成横平竖直的规范 SVG：流程图（正交
 | 类型 | 适用形态 | 超限即报错降级（引擎明确报错，不产烂图） |
 | --- | --- | --- |
 | flowchart | 单主干 + 左右分支链 + 直角回线 + 左侧旁路源 + 主干跳级边 | 不符合形态（孤立链/孤岛）报错；交叉 > 3 建议 mermaid 原生 |
-| arch | 泳道数 ≤ 6；泳道内边仅相邻节点；矩形/外部/后台节点 | decision 菱形、通道溢出 |
+| arch | 泳道数 ≤ 6；矩形/外部/后台节点；跳级边走顶部走廊 | decision 菱形、交错跳级边交叉无法消除 |
 | er | 实体 ≤ 8；合法基数记号；属性行齐全 | barycenter 重排后仍有交叉 |
 | gantt | `YYYY-MM-DD` / `HH:mm`；任务 ≤ 40；`Nd`/`Nw`/`Nm` 时长；`after` 依赖 | 其他 dateFormat、`until`、解析失败 |
 | seq | participant ≤ 6；消息仅相邻列或自消息 | note/alt/loop/opt/激活条、跨列消息、actor |

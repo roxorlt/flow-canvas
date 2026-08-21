@@ -179,24 +179,27 @@ def _place(spec, st):
         raise SystemExit("错误：泳道数 %d 超过上限 %d（形态超限）" % (len(lanes), MAX_LANES))
 
     warnings = []
+    skips = []
     for e in edges:
         a, b = N[e["from"]], N[e["to"]]
         li, lj = lane_of[e["from"]], lane_of[e["to"]]
         if li == lj:
             ids = lanes[li]["ids"]
             ia, ib = ids.index(e["from"]), ids.index(e["to"])
-            if abs(ia - ib) != 1:
-                raise SystemExit("错误：泳道内边 %s→%s 非相邻节点（形态超限，请改用 mermaid 原生渲染）"
-                                 % (e["from"], e["to"]))
-            e["same"] = True
-            e["up"] = ia < ib
+            if abs(ia - ib) == 1:
+                e["kind"] = "adj"
+                e["up"] = ia < ib
+            else:
+                e["kind"] = "skip"   # 泳道内跳级边：走顶部走廊
+                skips.append(e)
+        elif abs(li - lj) == 1:
+            e["kind"] = "bus"        # 相邻泳道：走共享垂直总线
         else:
-            if abs(li - lj) != 1:
-                raise SystemExit("错误：跨泳道边 %s→%s 跨越多个泳道（形态超限，请拆边或改用 mermaid 原生渲染）"
-                                 % (e["from"], e["to"]))
-            e["same"] = False
+            e["kind"] = "skip"       # 跨多泳道边：走顶部走廊
+            skips.append(e)
 
-    margin = 20
+    # 顶部走廊：每条跳级边一条（14px 高），按泳道跨度升序（嵌套跨度零交叉）
+    margin = 20 + 14 * len(skips)
     fs = st["fs_node"]
     lane_w = []
     for l in lanes:
@@ -230,13 +233,30 @@ def _place(spec, st):
     for g in range(n_gaps):
         bus_x[g] = (lane_x[g] + lane_w[g] / 2 + lane_x[g + 1] - lane_w[g + 1] / 2) / 2
 
+    skips_sorted = sorted(skips, key=lambda e: (abs(lane_of[e["from"]] - lane_of[e["to"]]),
+                                                min(N[e["from"]]["y"], N[e["to"]]["y"])))
+    skip_y = {id(e): 8 + 14 * k + 7 for k, e in enumerate(skips_sorted)}
+
     side_use = {}
     for e in edges:
-        if e["same"]:
-            continue
         li, lj = lane_of[e["from"]], lane_of[e["to"]]
-        side = "R" if li < lj else "L"
-        side_use.setdefault((e["from"], side), []).append(id(e))
+        if e["kind"] == "bus":
+            side = "R" if li < lj else "L"
+            side_use.setdefault((e["from"], side), []).append(id(e))
+        elif e["kind"] == "skip":
+            a, b = N[e["from"]], N[e["to"]]
+            if li != lj:
+                side_src = "R" if li < lj else "L"
+                side_tgt = "L" if li < lj else "R"
+            else:
+                if li < n_gaps:
+                    side_src = "R"
+                    side_tgt = "L" if li > 0 else "R"
+                else:
+                    side_src = "L"
+                    side_tgt = "R"
+            side_use.setdefault((e["from"], side_src), []).append(id(e))
+            side_use.setdefault((e["to"], side_tgt), []).append(id(e))
     port_off = {}
     for (nid, side), ids in side_use.items():
         n = len(ids)
@@ -246,7 +266,7 @@ def _place(spec, st):
     routes = []
     for e in edges:
         a, b = N[e["from"]], N[e["to"]]
-        if e["same"]:
+        if e["kind"] == "adj":
             if e["up"]:  # a 在上、边向下：a 底端口 → b 顶端口
                 pts = [(a["x"], a["y"] + a["h"] / 2), (b["x"], b["y"] - b["h"] / 2)]
             else:        # a 在下、边向上：a 顶端口 → b 底端口
@@ -256,19 +276,51 @@ def _place(spec, st):
                            "anchor": "start", "arrow": True})
             continue
         li, lj = lane_of[e["from"]], lane_of[e["to"]]
-        bx = bus_x[min(li, lj)]
         off = port_off.get(id(e), 0)
+        if e["kind"] == "bus":
+            bx = bus_x[min(li, lj)]
+            if li < lj:
+                sx, sy = port(a, "R")
+                tx, ty = port(b, "L")
+            else:
+                sx, sy = port(a, "L")
+                tx, ty = port(b, "R")
+            sy += off
+            ty -= off
+            pts = [(sx, sy), (bx, sy), (bx, ty), (tx, ty)]
+            routes.append({"pts": pts, "label": e.get("label", []),
+                           "lx": (sx + bx) / 2, "ly": sy - 8,
+                           "anchor": "middle", "arrow": True})
+            continue
+        # skip：顶部走廊路由（源侧 bus 上探 → 走廊横移 → 目标侧 bus 下探）
+        yc = skip_y[id(e)]
         if li < lj:
+            up_gap, down_gap = li, lj - 1
             sx, sy = port(a, "R")
             tx, ty = port(b, "L")
-        else:
+        elif lj < li:
+            up_gap, down_gap = li - 1, lj
             sx, sy = port(a, "L")
             tx, ty = port(b, "R")
+        else:
+            if li < n_gaps:
+                up_gap = li
+                down_gap = li - 1 if li > 0 else li
+                sx, sy = port(a, "R")
+                tx, ty = port(b, "L") if down_gap < li else port(b, "R")
+            else:
+                up_gap = down_gap = li - 1
+                sx, sy = port(a, "L")
+                tx, ty = port(b, "R")
         sy += off
         ty -= off
-        pts = [(sx, sy), (bx, sy), (bx, ty), (tx, ty)]
+        b1, b2 = bus_x[up_gap], bus_x[down_gap]
+        if b1 == b2:
+            pts = [(sx, sy), (b1, sy), (b1, yc), (b2, ty), (tx, ty)]
+        else:
+            pts = [(sx, sy), (b1, sy), (b1, yc), (b2, yc), (b2, ty), (tx, ty)]
         routes.append({"pts": pts, "label": e.get("label", []),
-                       "lx": (sx + bx) / 2, "ly": sy - 8,
+                       "lx": (sx + b1) / 2, "ly": sy - 8,
                        "anchor": "middle", "arrow": True})
 
     crossings = ortho_crossings(routes)
@@ -290,7 +342,8 @@ def _place(spec, st):
                              "need": round(need), "avail": round(avail)})
     return {"nodes": N, "order": [n["id"] for n in spec["nodes"]], "routes": routes,
             "lanes": lanes, "lane_of": lane_of, "lane_x": lane_x, "lane_w": lane_w,
-            "extra": {"title_y": margin + 10, "y_top": y_top, "bottom": H - margin - 10},
+            "extra": {"title_y": margin + 10, "y_top": y_top, "bottom": H - margin - 10,
+                      "band_top": margin - 4},
             "W": W, "H": H, "style": st,
             "crossings": crossings, "overlaps": overlaps,
             "textOverflow": overflow, "warnings": warnings}
@@ -313,7 +366,7 @@ def render_svg(lay, title=""):
         out.append('<g class="lane" id="arch-lane-%d">' % i)
         out.append('<rect x="%g" y="%g" width="%g" height="%g" fill="%s" stroke="%s" '
                    'stroke-width="0.8" stroke-dasharray="4 4" rx="6"/>'
-                   % (x0, st["fs_section"] + 8, w, lay["extra"]["bottom"] - st["fs_section"] - 8,
+                   % (x0, lay["extra"]["band_top"], w, lay["extra"]["bottom"] - lay["extra"]["band_top"],
                       st["band_fill"], st["band_stroke"]))
         if l["title"]:
             out.append('<text x="%g" y="%g" font-size="%d" fill="%s" text-anchor="middle" '
